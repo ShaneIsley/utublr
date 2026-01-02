@@ -1,0 +1,40 @@
+# YouTube Channels Configuration
+# 
+# List channels to track. Each channel can be specified by:
+# - Channel ID (e.g., UC_x5XG1OV2P6uZZ5FSM9Ttw)
+# - Handle (e.g., @GoogleDevelopers)
+# - URL (e.g., https://www.youtube.com/@GoogleDevelopers)
+#
+# You can also specify per-channel options:
+# - max_videos: Limit videos to fetch (useful for very large channels)
+# - fetch_comments: true/false (default: true)
+# - fetch_transcripts: true/false (default: true)
+
+channels:
+  # Simple format - just the identifier
+  - "@bulwarkmedia"
+  - "@thenewsagents"
+  - "@TheMajorityReport"
+  - "@samwitteveenai"
+  
+  # Detailed format with options
+  # - identifier: "@mkbhd"
+  #   max_videos: 500
+  #   fetch_comments: true
+  #   fetch_transcripts: true
+  
+  # - identifier: "UC_x5XG1OV2P6uZZ5FSM9Ttw"
+  #   fetch_comments: false  # Skip comments for this channel
+
+# Global settings (can be overridden per-channel)
+settings:
+  # Rate limiting: requests per second to YouTube API
+  requests_per_second: 2.0
+  
+  # Default max comments per video
+  max_comments_per_video: 500
+  
+  # Fetch schedule notes:
+  # - 4x daily is good for trending/stats
+  # - Transcripts only need fetching once
+  # - Comments can be incremental (only new since last fetch)
