@@ -199,11 +199,12 @@ def get_latest_comment_time(conn: duckdb.DuckDBPyConnection, video_id: str) -> O
 
 def start_fetch_log(conn: duckdb.DuckDBPyConnection, channel_id: str, fetch_type: str) -> int:
     """Start a fetch log entry, return the fetch_id."""
+    now = datetime.now()
     result = conn.execute("""
         INSERT INTO fetch_log (fetch_id, channel_id, fetch_type, started_at, status)
-        VALUES (nextval('fetch_log_seq'), ?, ?, CURRENT_TIMESTAMP, 'running')
+        VALUES (nextval('fetch_log_seq'), ?, ?, ?, 'running')
         RETURNING fetch_id
-    """, [channel_id, fetch_type]).fetchone()
+    """, [channel_id, fetch_type, now]).fetchone()
     conn.commit()
     return result[0]
 
@@ -212,27 +213,29 @@ def complete_fetch_log(conn: duckdb.DuckDBPyConnection, fetch_id: int,
                        videos: int, comments: int, transcripts: int, 
                        status: str = 'completed', errors: str = None) -> None:
     """Complete a fetch log entry."""
+    now = datetime.now()
     conn.execute("""
         UPDATE fetch_log 
-        SET completed_at = CURRENT_TIMESTAMP,
+        SET completed_at = ?,
             videos_fetched = ?,
             comments_fetched = ?,
             transcripts_fetched = ?,
             status = ?,
             errors = ?
         WHERE fetch_id = ?
-    """, [videos, comments, transcripts, status, errors, fetch_id])
+    """, [now, videos, comments, transcripts, status, errors, fetch_id])
     conn.commit()
 
 
 def upsert_channel(conn: duckdb.DuckDBPyConnection, channel: dict) -> None:
     """Insert or update channel metadata."""
+    now = datetime.now()
     conn.execute("""
         INSERT OR REPLACE INTO channels (
             channel_id, title, description, custom_url, country, published_at,
             thumbnail_url, banner_url, keywords, topic_categories, 
             uploads_playlist_id, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, [
         channel['channel_id'],
         channel.get('title'),
@@ -244,19 +247,22 @@ def upsert_channel(conn: duckdb.DuckDBPyConnection, channel: dict) -> None:
         channel.get('banner_url'),
         channel.get('keywords'),
         channel.get('topic_categories', []),
-        channel.get('uploads_playlist_id')
+        channel.get('uploads_playlist_id'),
+        now
     ])
     conn.commit()
 
 
 def insert_channel_stats(conn: duckdb.DuckDBPyConnection, channel_id: str, stats: dict) -> None:
     """Insert channel stats snapshot."""
+    now = datetime.now()
     conn.execute("""
         INSERT INTO channel_stats (channel_id, fetched_at, subscriber_count, view_count, video_count)
-        VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT DO NOTHING
     """, [
         channel_id,
+        now,
         stats.get('subscriber_count', 0),
         stats.get('view_count', 0),
         stats.get('video_count', 0)
@@ -266,6 +272,7 @@ def insert_channel_stats(conn: duckdb.DuckDBPyConnection, channel_id: str, stats
 
 def upsert_video(conn: duckdb.DuckDBPyConnection, video: dict) -> None:
     """Insert or update video metadata."""
+    now = datetime.now()
     conn.execute("""
         INSERT INTO videos (
             video_id, channel_id, title, description, published_at,
@@ -273,7 +280,7 @@ def upsert_video(conn: duckdb.DuckDBPyConnection, video: dict) -> None:
             default_audio_language, tags, thumbnail_url, caption_available,
             definition, dimension, projection, privacy_status, license,
             embeddable, made_for_kids, topic_categories, has_chapters, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (video_id) DO UPDATE SET
             title = EXCLUDED.title,
             description = EXCLUDED.description,
@@ -282,7 +289,7 @@ def upsert_video(conn: duckdb.DuckDBPyConnection, video: dict) -> None:
             caption_available = EXCLUDED.caption_available,
             privacy_status = EXCLUDED.privacy_status,
             has_chapters = EXCLUDED.has_chapters,
-            updated_at = CURRENT_TIMESTAMP
+            updated_at = EXCLUDED.updated_at
     """, [
         video['video_id'],
         video.get('channel_id'),
@@ -305,19 +312,22 @@ def upsert_video(conn: duckdb.DuckDBPyConnection, video: dict) -> None:
         video.get('embeddable'),
         video.get('made_for_kids'),
         video.get('topic_categories', []),
-        video.get('has_chapters', False)
+        video.get('has_chapters', False),
+        now
     ])
     conn.commit()
 
 
 def insert_video_stats(conn: duckdb.DuckDBPyConnection, video_id: str, stats: dict) -> None:
     """Insert video stats snapshot."""
+    now = datetime.now()
     conn.execute("""
         INSERT INTO video_stats (video_id, fetched_at, view_count, like_count, comment_count)
-        VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT DO NOTHING
     """, [
         video_id,
+        now,
         stats.get('view_count', 0),
         stats.get('like_count', 0),
         stats.get('comment_count', 0)
@@ -389,11 +399,12 @@ def insert_comments(conn: duckdb.DuckDBPyConnection, comments: list[dict]) -> in
 
 def upsert_playlist(conn: duckdb.DuckDBPyConnection, playlist: dict) -> None:
     """Insert or update playlist."""
+    now = datetime.now()
     conn.execute("""
         INSERT OR REPLACE INTO playlists (
             playlist_id, channel_id, title, description, published_at,
             thumbnail_url, item_count, privacy_status, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, [
         playlist['playlist_id'],
         playlist.get('channel_id'),
@@ -402,7 +413,8 @@ def upsert_playlist(conn: duckdb.DuckDBPyConnection, playlist: dict) -> None:
         playlist.get('published_at'),
         playlist.get('thumbnail_url'),
         playlist.get('item_count'),
-        playlist.get('privacy_status')
+        playlist.get('privacy_status'),
+        now
     ])
     conn.commit()
 
