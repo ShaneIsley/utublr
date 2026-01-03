@@ -87,8 +87,11 @@ def fetch_channel_data(
     max_videos: int = None,
     max_video_age_days: int = None,
     max_comments_per_video: int = 500,
+    max_replies_per_comment: int = 10,
     stats_update_hours: int = 6,
     comments_update_hours: int = 24,
+    comments_update_hours_new: int = 6,
+    new_video_days: int = 7,
     batch_size: int = DEFAULT_BATCH_SIZE,
     backfill: bool = False,
     start_time: float = None,
@@ -101,10 +104,14 @@ def fetch_channel_data(
     - Batched commits with checkpointing for resume
     - Quota tracking and early abort
     - Time limit awareness
+    - Tiered comment updates (more frequent for new videos)
     
     Args:
         batch_size: Number of videos to process before committing (default: 10)
         max_runtime_minutes: Stop if approaching this runtime limit
+        comments_update_hours: Hours between comment re-fetch for older videos (default: 24)
+        comments_update_hours_new: Hours between comment re-fetch for new videos (default: 6)
+        new_video_days: Videos younger than this are "new" (default: 7)
     
     Returns:
         Dict with counts of fetched items and status.
@@ -383,8 +390,15 @@ def fetch_channel_data(
         if fetch_comments:
             if backfill:
                 videos_for_comments = all_video_ids[:max_videos] if max_videos else all_video_ids
+                log.info(f"Backfill: fetching comments for all {len(videos_for_comments)} videos")
             else:
-                videos_for_comments = get_videos_needing_comments(conn, channel_id, comments_update_hours)
+                videos_for_comments = get_videos_needing_comments(
+                    conn, 
+                    channel_id, 
+                    hours_since_last=comments_update_hours,
+                    hours_since_last_new=comments_update_hours_new,
+                    new_video_days=new_video_days
+                )
             
             if videos_for_comments:
                 log.info(f"Fetching comments for {len(videos_for_comments)} videos")
@@ -662,7 +676,19 @@ def main():
         "--comments-update-hours",
         type=int,
         default=24,
-        help="Only fetch comments if older than this (default: 24 hours)"
+        help="Hours before re-fetching comments for older videos (default: 24)"
+    )
+    parser.add_argument(
+        "--comments-update-hours-new",
+        type=int,
+        default=6,
+        help="Hours before re-fetching comments for new videos (default: 6)"
+    )
+    parser.add_argument(
+        "--new-video-days",
+        type=int,
+        default=7,
+        help="Videos younger than this many days are 'new' and get more frequent comment updates (default: 7)"
     )
     parser.add_argument(
         "--max-runtime-minutes",
@@ -716,6 +742,7 @@ def main():
     
     # Determine channels to fetch
     channels = []
+    config = {}  # Initialize empty config
     if args.channel:
         channels = [{"identifier": args.channel}]
     elif args.config:
@@ -807,6 +834,13 @@ def main():
             identifier = channel_config.get("identifier") or channel_config.get("id") or channel_config.get("handle")
             channel_options = channel_config
         
+        # Get global settings from config, merge with channel-specific options
+        global_settings = config.get("settings", {})
+        
+        # Channel options override global settings
+        def get_option(key, default):
+            return channel_options.get(key, global_settings.get(key, default))
+        
         try:
             stats = fetch_channel_data(
                 fetcher=fetcher,
@@ -817,10 +851,13 @@ def main():
                 fetch_transcripts=not args.skip_transcripts and channel_options.get("fetch_transcripts", True),
                 max_videos=args.max_videos or channel_options.get("max_videos"),
                 max_video_age_days=args.max_video_age or channel_options.get("max_video_age_days"),
-                max_comments_per_video=args.max_comments,
+                max_comments_per_video=get_option("max_comments_per_video", args.max_comments),
+                max_replies_per_comment=get_option("max_replies_per_comment", args.max_replies),
                 batch_size=args.batch_size,
-                stats_update_hours=args.stats_update_hours,
-                comments_update_hours=args.comments_update_hours,
+                stats_update_hours=get_option("stats_update_hours", args.stats_update_hours),
+                comments_update_hours=get_option("comments_update_hours", args.comments_update_hours),
+                comments_update_hours_new=get_option("comments_update_hours_new", args.comments_update_hours_new),
+                new_video_days=get_option("new_video_days", args.new_video_days),
                 backfill=args.backfill,
                 start_time=start_time,
                 max_runtime_minutes=args.max_runtime_minutes,
