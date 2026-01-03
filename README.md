@@ -1,29 +1,18 @@
 # YouTube Channel Analytics Tracker
 
-A production-ready system for tracking YouTube channel metadata over time. Designed for ongoing analysis of multiple channels with efficient incremental updates.
+A production-ready system for tracking YouTube channel metadata over time using Turso (cloud SQLite) for persistent storage.
 
 ## Features
 
 - **Multi-channel tracking** - Monitor dozens of channels from a single config file
-- **Incremental updates** - Only fetches new data since last run
-- **Time-series storage** - Track view counts, subscribers, comments over time
-- **DuckDB backend** - Fast SQL queries, single-file database, Parquet export
-- **Smart caching** - Transcripts fetched once, comments deduplicated
-- **Rate limiting** - Built-in API quota management
-- **GitHub Actions** - Scheduled 4x daily fetches with artifact storage
-
-## Data Collected
-
-| Data Type | Update Frequency | Storage |
-|-----------|-----------------|---------|
-| Channel metadata | Every run | Upserted |
-| Channel stats (subscribers, views) | Every run | Append-only time series |
-| Video metadata | Every run | Upserted |
-| Video stats (views, likes) | Every run | Append-only time series |
-| Chapters | When video changes | Replaced |
-| Transcripts | Once per video | Write-once |
-| Comments | Incremental (new only) | Append with dedup |
-| Playlists | Every run | Upserted |
+- **Smart incremental updates** - Only fetches new/changed data to minimize API usage
+- **Turso cloud database** - No more artifact uploads; data persists reliably
+- **Quota tracking** - Monitors API usage, warns before exhaustion
+- **Checkpointing** - Resume interrupted fetches from where they left off
+- **Retry with backoff** - Handles transient API errors gracefully
+- **Dry-run mode** - Preview what would be fetched without using quota
+- **Deletion detection** - Tracks when videos are removed from channels
+- **Detailed logging** - DEBUG logs to file for troubleshooting
 
 ## Quick Start
 
@@ -33,114 +22,102 @@ A production-ready system for tracking YouTube channel metadata over time. Desig
 pip install -r requirements.txt
 ```
 
-### 2. Set Up API Key
+### 2. Set Up Turso Database
 
 ```bash
-export YOUTUBE_API_KEY="your-api-key-here"
+# Install Turso CLI
+curl -sSfL https://get.tur.so/install.sh | bash
+
+# Create database
+turso db create youtube-tracker
+turso db show youtube-tracker --url    # Save this URL
+turso db tokens create youtube-tracker  # Save this token
 ```
 
-Get an API key from [Google Cloud Console](https://console.cloud.google.com/):
-1. Create/select a project
-2. Enable "YouTube Data API v3"
-3. Create credentials → API Key
+### 3. Set Environment Variables
 
-### 3. Create Channel Config
+```bash
+export YOUTUBE_API_KEY="your-youtube-api-key"
+export TURSO_DATABASE_URL="libsql://your-db.turso.io"
+export TURSO_AUTH_TOKEN="your-token"
+```
+
+### 4. Create Channel Config
 
 ```bash
 cp config/channels.example.yaml config/channels.yaml
-# Edit config/channels.yaml with your channels
+# Edit with your channels
 ```
 
-### 4. Run Initial Fetch
+### 5. Run
 
 ```bash
 cd scripts
 
-# Single channel
-python fetch.py --channel @GoogleDevelopers --backfill
+# Dry run first to see what would happen
+python fetch.py --config ../config/channels.yaml --dry-run
 
-# Multiple channels from config
+# Actual fetch
 python fetch.py --config ../config/channels.yaml --backfill
 ```
-
-### 5. Run Analysis
-
-```bash
-# Database summary
-python analyze.py --report summary
-
-# Top growing videos
-python analyze.py --report growth
-
-# Custom SQL
-python analyze.py --sql "SELECT title, view_count FROM videos ORDER BY view_count DESC LIMIT 10"
-
-# Export to CSV
-python analyze.py --report top-videos --output top_videos.csv
-```
-
-## Project Structure
-
-```
-├── scripts/
-│   ├── fetch.py          # Main fetcher script
-│   ├── analyze.py        # Query and reporting tool
-│   ├── database.py       # DuckDB schema and operations
-│   └── youtube_api.py    # YouTube API client
-├── config/
-│   └── channels.yaml     # Channels to track
-├── data/
-│   └── youtube.duckdb    # Database (created on first run)
-├── exports/              # Parquet exports
-└── .github/workflows/
-    └── fetch.yml         # GitHub Actions workflow
-```
-
-## GitHub Actions Setup
-
-### 1. Add Repository Secrets
-
-Go to Settings → Secrets → Actions:
-- `YOUTUBE_API_KEY`: Your YouTube Data API key
-
-### 2. Create Config File
-
-Either:
-- Commit `config/channels.yaml` to your repo, or
-- The workflow will use `channels.example.yaml` as fallback
-
-### 3. Enable Workflow
-
-The workflow runs automatically:
-- **4x daily**: Midnight, 6 AM, Noon, 6 PM UTC
-- **Manual**: Via Actions tab → Run workflow
-- **Weekly export**: Sundays at midnight (Parquet files)
-
-### 4. Access Data
-
-- **Database**: Download from Actions → workflow run → Artifacts
-- **Parquet exports**: Weekly exports for external analysis
 
 ## CLI Reference
 
 ### fetch.py
 
 ```bash
-# Single channel (backfill = full fetch)
-python fetch.py --channel @GoogleDevelopers --backfill
-
-# From config (incremental)
+# Basic usage
+python fetch.py --channel @GoogleDevelopers
 python fetch.py --config ../config/channels.yaml
 
+# Dry run (preview without fetching)
+python fetch.py --config ../config/channels.yaml --dry-run
+
+# Backfill mode (fetch everything, ignore incremental)
+python fetch.py --channel @GoogleDevelopers --backfill
+
+# With limits
+python fetch.py --channel @GoogleDevelopers \
+    --max-videos 500 \
+    --max-video-age 90 \
+    --max-comments 100 \
+    --max-replies 10 \
+    --batch-size 10
+
 # Skip expensive operations
-python fetch.py --config ../config/channels.yaml --skip-comments --skip-transcripts
+python fetch.py --config ../config/channels.yaml \
+    --skip-comments \
+    --skip-transcripts
 
-# Limit videos (useful for huge channels)
-python fetch.py --channel @YouTube --max-videos 1000
+# Control update frequency
+python fetch.py --config ../config/channels.yaml \
+    --stats-update-hours 6 \
+    --comments-update-hours 24
 
-# Export database to Parquet
+# Export to CSV
 python fetch.py --export
 ```
+
+### Command Line Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--channel` | - | Single channel ID, handle, or URL |
+| `--config` | - | Path to channels.yaml config file |
+| `--export` | - | Export database to CSV files |
+| `--dry-run` | false | Preview what would be fetched |
+| `--backfill` | false | Ignore incremental, fetch everything |
+| `--max-videos` | unlimited | Max videos per channel |
+| `--max-video-age` | unlimited | Only fetch videos within N days |
+| `--max-comments` | 100 | Max comments per video |
+| `--max-replies` | 10 | Max replies per comment (prevents blowup) |
+| `--batch-size` | 10 | Videos per batch/commit |
+| `--stats-update-hours` | 6 | Skip stats if updated within N hours |
+| `--comments-update-hours` | 24 | Skip comments if fetched within N hours |
+| `--max-runtime-minutes` | 300 | Stop after N minutes |
+| `--quota-limit` | 10000 | Daily API quota limit |
+| `--skip-comments` | false | Don't fetch comments |
+| `--skip-transcripts` | false | Don't fetch transcripts |
 
 ### analyze.py
 
@@ -148,142 +125,166 @@ python fetch.py --export
 # List available reports
 python analyze.py --list-reports
 
-# Run preset report
+# Run preset reports
+python analyze.py --report summary
+python analyze.py --report channels
 python analyze.py --report growth
 python analyze.py --report top-videos
-python analyze.py --report comment-velocity
-python analyze.py --report engagement-rate
-python analyze.py --report subscriber-growth
 
 # Custom SQL
-python analyze.py --sql "SELECT * FROM channels"
+python analyze.py --sql "SELECT title, view_count FROM videos ORDER BY view_count DESC LIMIT 10"
 
 # Export to CSV
 python analyze.py --report growth --output growth.csv
 ```
 
-## Available Reports
+## Smart Incremental Fetching
 
-| Report | Description |
-|--------|-------------|
-| `summary` | Overall database statistics |
-| `channels` | All tracked channels with latest stats |
-| `growth` | Video view growth over last 7 days |
-| `top-videos` | Highest view count videos |
-| `recent-uploads` | Most recent uploads across channels |
-| `comment-velocity` | Videos with most comment activity |
-| `engagement-rate` | Likes+comments per view |
-| `subscriber-growth` | Daily subscriber changes |
-| `transcript-coverage` | Transcript availability by channel |
-| `popular-commenters` | Most active commenters |
-| `video-length-performance` | Performance by duration |
-| `fetch-history` | Recent fetch operations |
+The system minimizes redundant API requests:
+
+| Data Type | Update Strategy | Skip If... |
+|-----------|-----------------|------------|
+| Channel stats | Every 6 hours | Updated within `--stats-update-hours` |
+| Video metadata | Only new videos | Video already in DB |
+| Video stats | Stale videos only | Updated within `--stats-update-hours` |
+| Transcripts | Once per video | Already have transcript |
+| Comments | Stale videos only | Fetched within `--comments-update-hours` |
+
+## Error Handling
+
+### Retry Logic
+All API calls retry up to 3 times with exponential backoff for:
+- HTTP 429 (rate limit)
+- HTTP 500/502/503/504 (server errors)
+- Connection errors
+
+### Checkpointing
+Progress is saved after each batch. If a run fails:
+1. Videos already processed are saved
+2. Next run resumes from where it left off
+3. No duplicate work or data loss
+
+### Quota Protection
+- Tracks quota usage across runs (persisted to file)
+- Warns at 80% usage
+- Aborts at 95% usage
+- Estimates cost before fetching each channel
+
+## Logging
+
+Logs are written to `scripts/logs/` with DEBUG level:
+
+```
+logs/
+├── fetch_20250103_143052.log  # Timestamped log files
+└── latest.log                  # Symlink to most recent
+```
+
+Log format:
+```
+2025-01-03 14:30:52 | DEBUG    | youtube_api:fetch_channel:245 | Fetching channel metadata for: UCxyz...
+```
+
+Set log levels via environment:
+```bash
+export LOG_LEVEL=DEBUG          # File log level (default: DEBUG)
+export CONSOLE_LOG_LEVEL=INFO   # Console log level (default: INFO)
+```
+
+## GitHub Actions Setup
+
+### 1. Add Repository Secrets
+
+- `YOUTUBE_API_KEY`: Your YouTube Data API key
+- `TURSO_DATABASE_URL`: `libsql://your-db.turso.io`
+- `TURSO_AUTH_TOKEN`: Your Turso auth token
+
+### 2. Workflow Features
+
+- Runs 4x daily (configurable)
+- Manual trigger with options
+- Logs uploaded as artifacts
+- Summary report in Actions UI
 
 ## Database Schema
 
 ### Core Tables
 
 ```sql
--- Channel info and stats
-channels (channel_id, title, description, ...)
-channel_stats (channel_id, fetched_at, subscriber_count, view_count, video_count)
-
--- Video info and stats
-videos (video_id, channel_id, title, published_at, duration_seconds, ...)
-video_stats (video_id, fetched_at, view_count, like_count, comment_count)
-
--- Content
-chapters (video_id, chapter_index, title, start_seconds, end_seconds)
-transcripts (video_id, language, full_text, entries_json)
-comments (comment_id, video_id, parent_comment_id, author, text, published_at, ...)
-playlists (playlist_id, channel_id, title, item_count, ...)
-
--- Metadata
-fetch_log (fetch_id, channel_id, fetch_type, started_at, completed_at, status, ...)
+channels        -- Channel metadata
+channel_stats   -- Subscriber/view counts over time (append-only)
+videos          -- Video metadata
+video_stats     -- View/like counts over time (append-only)
+chapters        -- Video chapters
+transcripts     -- Video transcripts (write-once)
+comments        -- All comments with threading
+playlists       -- Channel playlists
+fetch_log       -- Run history
+fetch_progress  -- Resume checkpoints
 ```
 
-### Example Queries
+### Deleted Video Handling
 
-```sql
--- View growth over time for a specific video
-SELECT fetched_at, view_count 
-FROM video_stats 
-WHERE video_id = 'dQw4w9WgXcQ'
-ORDER BY fetched_at;
-
--- Compare channels
-SELECT c.title, 
-       MAX(cs.subscriber_count) as subs,
-       COUNT(DISTINCT v.video_id) as videos
-FROM channels c
-JOIN channel_stats cs ON c.channel_id = cs.channel_id
-JOIN videos v ON c.channel_id = v.channel_id
-GROUP BY c.channel_id, c.title;
-
--- Find videos about specific topic (using transcripts)
-SELECT v.title, v.video_id
-FROM videos v
-JOIN transcripts t ON v.video_id = t.video_id
-WHERE t.full_text ILIKE '%machine learning%';
-```
+When a video is no longer in a channel's uploads:
+1. Marked as `privacy_status = 'deleted'`
+2. Stats/comments preserved for analysis
+3. Can be purged after N days if desired
 
 ## API Quota Management
 
-YouTube Data API quota: **10,000 units/day** (default)
+YouTube Data API v3 quota: **10,000 units/day** (default)
 
-| Operation | Cost | Notes |
-|-----------|------|-------|
-| Channel list | 1 | Per request |
-| Playlist items | 1 | Per page (50 items) |
-| Videos list | 1 | Per page (50 videos) |
-| Comment threads | 1 | Per page (100 comments) |
+| Operation | Cost |
+|-----------|------|
+| channels.list | 1 |
+| playlists.list | 1 |
+| playlistItems.list | 1 |
+| videos.list | 1 |
+| commentThreads.list | 1 |
+| search.list | 100 |
 
-**Estimated usage per channel:**
-- Basic metadata: ~50 units
-- With comments (500/video): ~500-2000 units
+**Typical usage per channel:**
+- Basic fetch (100 videos): ~10 units
+- With comments: ~100-500 units
 - Transcripts: 0 (doesn't use API)
 
-**For 20 channels, 4x daily:**
-- Without comments: ~4,000 units/day ✅
-- With comments: May exceed quota ⚠️
+## Configuration
 
-Tips:
-- Use `--skip-comments` for some runs
-- Limit `--max-comments` per video
-- Transcripts are free (scraped, not API)
+### channels.yaml
 
-## Scaling Considerations
+```yaml
+channels:
+  # Simple format
+  - "@GoogleDevelopers"
+  - "@Android"
+  
+  # Detailed format with per-channel options
+  - identifier: "@TheMajorityReport"
+    max_videos: 1000
+    max_video_age_days: 90
+    fetch_comments: false
+    fetch_transcripts: true
+```
 
-### For 90 days × dozens of channels
+## Troubleshooting
 
-- **Database size**: ~100MB-1GB depending on comment volume
-- **Parquet export**: More efficient for heavy analysis
-- **Query performance**: DuckDB handles millions of rows easily
-- **GitHub artifacts**: 90-day retention, may need external storage for longer
+### "Quota exhausted"
+- Check `data/quota_state.json` for current usage
+- Wait until midnight Pacific time for reset
+- Use `--skip-comments` to reduce usage
 
-### External Storage Options
+### "YOUTUBE_API_KEY not provided"
+- Ensure environment variable is set
+- Check GitHub Actions secrets
 
-For long-term storage beyond GitHub artifacts:
-- Export Parquet to S3/GCS
-- Use GitHub releases for snapshots
-- Sync to external database
+### "Could not resolve channel ID"
+- Verify the channel exists
+- Try using the full channel ID (UC...)
 
-## Comment Fields
-
-Each comment includes:
-
-| Field | Description |
-|-------|-------------|
-| `comment_id` | Unique identifier |
-| `video_id` | Parent video |
-| `parent_comment_id` | NULL for top-level, ID for replies |
-| `author_display_name` | Commenter's display name |
-| `author_channel_id` | Commenter's channel ID |
-| `text` | Comment text (plain text) |
-| `like_count` | Number of likes |
-| `published_at` | Original post time |
-| `updated_at` | Last edit time |
-| `fetched_at` | When we retrieved it |
+### Resuming failed runs
+- Progress is automatically saved
+- Just run the same command again
+- Check logs for what was completed
 
 ## License
 
