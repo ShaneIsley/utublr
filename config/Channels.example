@@ -10,11 +10,15 @@
 # - max_video_age_days: Only fetch videos within this many days
 # - fetch_comments: true/false (default: true)
 # - fetch_transcripts: true/false (default: true)
+# - comments_update_hours: Hours before re-fetching comments (default: 24)
+# - comments_update_hours_new: Hours for videos < 7 days old (default: 6)
+# - new_video_days: Videos younger than this are "new" (default: 7)
 
 channels:
   # Simple format - just the identifier
   - "@samwitteveenai"
   - "@trychroma"
+  - "@bulwarkmedia"
   
   # Detailed format with options
   # - identifier: "@bulwarkmedia"
@@ -22,6 +26,9 @@ channels:
   #   max_video_age_days: 365   # Only videos from last year
   #   fetch_comments: true
   #   fetch_transcripts: true
+  #   comments_update_hours: 24      # Re-check comments every 24h for older videos
+  #   comments_update_hours_new: 4   # Re-check every 4h for new videos
+  #   new_video_days: 7              # Videos < 7 days old are "new"
   
   # For very large/prolific channels, limit the scope:
   # - identifier: "@TheMajorityReport"
@@ -36,6 +43,11 @@ settings:
   
   # Default max comments per video
   max_comments_per_video: 500
+  
+  # Comment update frequency
+  comments_update_hours: 24        # Default for older videos
+  comments_update_hours_new: 1     # Default for new videos (< new_video_days old)
+  new_video_days: 2                # Videos younger than this get more frequent updates
   
   # Recommended constraints for large-scale tracking:
   # - Set max_video_age_days: 90-365 for ongoing analysis
