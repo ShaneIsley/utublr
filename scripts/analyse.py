@@ -22,8 +22,6 @@ import argparse
 import sys
 from datetime import datetime, timedelta
 
-import duckdb
-
 from database import get_connection
 
 
@@ -52,11 +50,10 @@ REPORTS = {
                 cs.video_count,
                 cs.fetched_at as last_updated
             FROM channels c
-            JOIN (
-                SELECT channel_id, subscriber_count, view_count, video_count, fetched_at,
-                       ROW_NUMBER() OVER (PARTITION BY channel_id ORDER BY fetched_at DESC) as rn
-                FROM channel_stats
-            ) cs ON c.channel_id = cs.channel_id AND cs.rn = 1
+            JOIN channel_stats cs ON c.channel_id = cs.channel_id
+            WHERE cs.fetched_at = (
+                SELECT MAX(fetched_at) FROM channel_stats WHERE channel_id = c.channel_id
+            )
             ORDER BY cs.subscriber_count DESC
         """
     },
@@ -64,30 +61,28 @@ REPORTS = {
     "growth": {
         "description": "Video view growth over last 7 days",
         "query": """
-            WITH stats_range AS (
+            WITH recent_stats AS (
                 SELECT 
                     video_id,
-                    MIN(view_count) FILTER (WHERE fetched_at >= CURRENT_TIMESTAMP - INTERVAL '7 days') as views_start,
-                    MAX(view_count) as views_end,
-                    MIN(fetched_at) FILTER (WHERE fetched_at >= CURRENT_TIMESTAMP - INTERVAL '7 days') as first_fetch,
-                    MAX(fetched_at) as last_fetch
+                    MIN(view_count) as views_start,
+                    MAX(view_count) as views_end
                 FROM video_stats
-                WHERE fetched_at >= CURRENT_TIMESTAMP - INTERVAL '7 days'
+                WHERE fetched_at >= datetime('now', '-7 days')
                 GROUP BY video_id
                 HAVING COUNT(*) >= 2
             )
             SELECT 
                 v.title,
                 c.title as channel,
-                sr.views_end - sr.views_start as view_growth,
-                sr.views_start as views_7d_ago,
-                sr.views_end as views_now,
-                ROUND(100.0 * (sr.views_end - sr.views_start) / NULLIF(sr.views_start, 0), 2) as growth_pct,
+                rs.views_end - rs.views_start as view_growth,
+                rs.views_start as views_7d_ago,
+                rs.views_end as views_now,
+                ROUND(100.0 * (rs.views_end - rs.views_start) / MAX(rs.views_start, 1), 2) as growth_pct,
                 v.published_at
-            FROM stats_range sr
-            JOIN videos v ON sr.video_id = v.video_id
+            FROM recent_stats rs
+            JOIN videos v ON rs.video_id = v.video_id
             JOIN channels c ON v.channel_id = c.channel_id
-            WHERE sr.views_end > sr.views_start
+            WHERE rs.views_end > rs.views_start
             ORDER BY view_growth DESC
             LIMIT 50
         """
@@ -106,11 +101,10 @@ REPORTS = {
                 v.duration_seconds / 60 as duration_mins
             FROM videos v
             JOIN channels c ON v.channel_id = c.channel_id
-            JOIN (
-                SELECT video_id, view_count, like_count, comment_count,
-                       ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY fetched_at DESC) as rn
-                FROM video_stats
-            ) vs ON v.video_id = vs.video_id AND vs.rn = 1
+            JOIN video_stats vs ON v.video_id = vs.video_id
+            WHERE vs.fetched_at = (
+                SELECT MAX(fetched_at) FROM video_stats WHERE video_id = v.video_id
+            )
             ORDER BY vs.view_count DESC
             LIMIT 50
         """
@@ -129,11 +123,8 @@ REPORTS = {
                 CASE WHEN t.video_id IS NOT NULL THEN 'Yes' ELSE 'No' END as has_transcript
             FROM videos v
             JOIN channels c ON v.channel_id = c.channel_id
-            LEFT JOIN (
-                SELECT video_id, view_count, like_count,
-                       ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY fetched_at DESC) as rn
-                FROM video_stats
-            ) vs ON v.video_id = vs.video_id AND vs.rn = 1
+            LEFT JOIN video_stats vs ON v.video_id = vs.video_id 
+                AND vs.fetched_at = (SELECT MAX(fetched_at) FROM video_stats WHERE video_id = v.video_id)
             LEFT JOIN transcripts t ON v.video_id = t.video_id
             ORDER BY v.published_at DESC
             LIMIT 50
@@ -147,12 +138,12 @@ REPORTS = {
                 v.title,
                 c.title as channel,
                 COUNT(*) as new_comments_7d,
-                COUNT(*) / 7.0 as comments_per_day,
+                ROUND(COUNT(*) / 7.0, 1) as comments_per_day,
                 v.published_at
             FROM comments cm
             JOIN videos v ON cm.video_id = v.video_id
             JOIN channels c ON v.channel_id = c.channel_id
-            WHERE cm.published_at >= CURRENT_TIMESTAMP - INTERVAL '7 days'
+            WHERE cm.published_at >= datetime('now', '-7 days')
             GROUP BY v.video_id, v.title, c.title, v.published_at
             ORDER BY new_comments_7d DESC
             LIMIT 30
@@ -168,16 +159,15 @@ REPORTS = {
                 vs.view_count,
                 vs.like_count,
                 vs.comment_count,
-                ROUND(100.0 * (vs.like_count + vs.comment_count) / NULLIF(vs.view_count, 0), 4) as engagement_rate,
+                ROUND(100.0 * (vs.like_count + vs.comment_count) / MAX(vs.view_count, 1), 4) as engagement_rate,
                 v.published_at
             FROM videos v
             JOIN channels c ON v.channel_id = c.channel_id
-            JOIN (
-                SELECT video_id, view_count, like_count, comment_count,
-                       ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY fetched_at DESC) as rn
-                FROM video_stats
-            ) vs ON v.video_id = vs.video_id AND vs.rn = 1
-            WHERE vs.view_count > 1000
+            JOIN video_stats vs ON v.video_id = vs.video_id
+            WHERE vs.fetched_at = (
+                SELECT MAX(fetched_at) FROM video_stats WHERE video_id = v.video_id
+            )
+            AND vs.view_count > 1000
             ORDER BY engagement_rate DESC
             LIMIT 50
         """
@@ -186,31 +176,15 @@ REPORTS = {
     "subscriber-growth": {
         "description": "Channel subscriber growth over time",
         "query": """
-            WITH daily_stats AS (
-                SELECT 
-                    channel_id,
-                    DATE_TRUNC('day', fetched_at) as day,
-                    MAX(subscriber_count) as subscribers
-                FROM channel_stats
-                GROUP BY channel_id, DATE_TRUNC('day', fetched_at)
-            ),
-            growth AS (
-                SELECT 
-                    channel_id,
-                    day,
-                    subscribers,
-                    LAG(subscribers) OVER (PARTITION BY channel_id ORDER BY day) as prev_subscribers
-                FROM daily_stats
-            )
             SELECT 
                 c.title as channel,
-                g.day,
-                g.subscribers,
-                g.subscribers - COALESCE(g.prev_subscribers, g.subscribers) as daily_growth
-            FROM growth g
-            JOIN channels c ON g.channel_id = c.channel_id
-            WHERE g.day >= CURRENT_DATE - INTERVAL '30 days'
-            ORDER BY c.title, g.day
+                DATE(cs.fetched_at) as day,
+                MAX(cs.subscriber_count) as subscribers
+            FROM channel_stats cs
+            JOIN channels c ON cs.channel_id = c.channel_id
+            WHERE cs.fetched_at >= datetime('now', '-30 days')
+            GROUP BY c.channel_id, c.title, DATE(cs.fetched_at)
+            ORDER BY c.title, day
         """
     },
     
@@ -221,7 +195,7 @@ REPORTS = {
                 c.title as channel,
                 COUNT(v.video_id) as total_videos,
                 COUNT(t.video_id) as with_transcript,
-                ROUND(100.0 * COUNT(t.video_id) / COUNT(v.video_id), 1) as coverage_pct
+                ROUND(100.0 * COUNT(t.video_id) / MAX(COUNT(v.video_id), 1), 1) as coverage_pct
             FROM channels c
             JOIN videos v ON c.channel_id = v.channel_id
             LEFT JOIN transcripts t ON v.video_id = t.video_id
@@ -265,14 +239,13 @@ REPORTS = {
                 COUNT(*) as video_count,
                 ROUND(AVG(vs.view_count)) as avg_views,
                 ROUND(AVG(vs.like_count)) as avg_likes,
-                ROUND(AVG(100.0 * vs.like_count / NULLIF(vs.view_count, 0)), 2) as avg_like_rate
+                ROUND(AVG(100.0 * vs.like_count / MAX(vs.view_count, 1)), 2) as avg_like_rate
             FROM videos v
-            JOIN (
-                SELECT video_id, view_count, like_count,
-                       ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY fetched_at DESC) as rn
-                FROM video_stats
-            ) vs ON v.video_id = vs.video_id AND vs.rn = 1
-            WHERE v.duration_seconds IS NOT NULL
+            JOIN video_stats vs ON v.video_id = vs.video_id
+            WHERE vs.fetched_at = (
+                SELECT MAX(fetched_at) FROM video_stats WHERE video_id = v.video_id
+            )
+            AND v.duration_seconds IS NOT NULL
             GROUP BY length_bucket
             ORDER BY 
                 CASE length_bucket
@@ -381,11 +354,6 @@ def main():
         help="Run custom SQL query"
     )
     parser.add_argument(
-        "--db",
-        default="data/youtube.duckdb",
-        help="Path to DuckDB database"
-    )
-    parser.add_argument(
         "--output", "-o",
         help="Export results to CSV file"
     )
@@ -410,7 +378,7 @@ def main():
         sys.exit(1)
     
     # Connect to database
-    conn = get_connection(args.db)
+    conn = get_connection()
     
     # Get query
     if args.report:
