@@ -134,21 +134,21 @@ jobs:
           # Summary stats
           echo "### Database Summary" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          python analyze.py --report summary >> $GITHUB_STEP_SUMMARY || echo "Could not generate summary"
+          python analyse.py --report summary >> $GITHUB_STEP_SUMMARY || echo "Could not generate summary"
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           # Channels
           echo "### Tracked Channels" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          python analyze.py --report channels >> $GITHUB_STEP_SUMMARY || echo "Could not list channels"
+          python analyse.py --report channels >> $GITHUB_STEP_SUMMARY || echo "Could not list channels"
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           # Recent fetch history
           echo "### Recent Fetches" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          python analyze.py --report fetch-history >> $GITHUB_STEP_SUMMARY || echo "Could not get fetch history"
+          python analyse.py --report fetch-history >> $GITHUB_STEP_SUMMARY || echo "Could not get fetch history"
           echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Upload logs
