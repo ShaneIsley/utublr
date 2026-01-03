@@ -5,26 +5,30 @@
 # - Handle (e.g., @GoogleDevelopers)
 # - URL (e.g., https://www.youtube.com/@GoogleDevelopers)
 #
-# You can also specify per-channel options:
-# - max_videos: Limit videos to fetch (useful for very large channels)
+# Per-channel options:
+# - max_videos: Limit videos to fetch (most recent first)
+# - max_video_age_days: Only fetch videos within this many days
 # - fetch_comments: true/false (default: true)
 # - fetch_transcripts: true/false (default: true)
 
 channels:
   # Simple format - just the identifier
-  - "@bulwarkmedia"
   - "@thenewsagents"
-  - "@TheMajorityReport"
   - "@samwitteveenai"
   
   # Detailed format with options
-  # - identifier: "@mkbhd"
-  #   max_videos: 500
-  #   fetch_comments: true
-  #   fetch_transcripts: true
+  - identifier: "@bulwarkmedia"
+     max_videos: 500           # Only most recent 500 videos
+     max_video_age_days: 90   # Only videos from last year
+     fetch_comments: true
+     fetch_transcripts: true
   
-  # - identifier: "UC_x5XG1OV2P6uZZ5FSM9Ttw"
-  #   fetch_comments: false  # Skip comments for this channel
+  # For very large/prolific channels, limit the scope:
+  - identifier: "@TheMajorityReport"
+     max_videos: 500
+     max_video_age_days: 90    # Only last 90 days
+     fetch_comments: true     # Skip comments to save quota
+     fetch_transcripts: true
 
 # Global settings (can be overridden per-channel)
 settings:
@@ -34,7 +38,7 @@ settings:
   # Default max comments per video
   max_comments_per_video: 500
   
-  # Fetch schedule notes:
-  # - 4x daily is good for trending/stats
-  # - Transcripts only need fetching once
-  # - Comments can be incremental (only new since last fetch)
+  # Recommended constraints for large-scale tracking:
+  # - Set max_video_age_days: 90-365 for ongoing analysis
+  # - Set max_videos: 500-2000 for initial backfill
+  # - Use skip_comments for channels with high volume
