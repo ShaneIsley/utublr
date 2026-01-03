@@ -371,7 +371,7 @@ def upsert_channel(conn, channel: dict) -> None:
             keywords = excluded.keywords,
             topic_categories = excluded.topic_categories,
             updated_at = excluded.updated_at
-    """, [
+    """, (
         channel['channel_id'],
         channel.get('title'),
         channel.get('description'),
@@ -384,7 +384,7 @@ def upsert_channel(conn, channel: dict) -> None:
         topic_categories,
         channel.get('uploads_playlist_id'),
         now
-    ])
+    ))
     conn.commit()
 
 
@@ -430,7 +430,7 @@ def upsert_video(conn, video: dict) -> None:
             privacy_status = excluded.privacy_status,
             has_chapters = excluded.has_chapters,
             updated_at = excluded.updated_at
-    """, [
+    """, (
         video['video_id'],
         video.get('channel_id'),
         video.get('title'),
@@ -455,7 +455,7 @@ def upsert_video(conn, video: dict) -> None:
         1 if video.get('has_chapters') else 0,
         now,  # first_seen_at (will be ignored on conflict)
         now   # updated_at
-    ])
+    ))
     conn.commit()
 
 
@@ -471,7 +471,7 @@ def insert_video_stats(conn, video_id: str, stats: dict) -> None:
         stats.get('view_count', 0),
         stats.get('like_count', 0),
         stats.get('comment_count', 0)
-    ,))
+    ))
     conn.commit()
 
 
@@ -499,7 +499,7 @@ def insert_transcript(conn, video_id: str, transcript: dict) -> bool:
     """
     # Check if already exists
     existing = conn.execute(
-        "SELECT 1 FROM transcripts WHERE video_id = ?", [video_id]
+        "SELECT 1 FROM transcripts WHERE video_id = ?", (video_id,)
     ).fetchone()
     
     if existing:
@@ -519,7 +519,7 @@ def insert_transcript(conn, video_id: str, transcript: dict) -> bool:
         transcript.get('full_text'),
         entries_json,
         now
-    ,))
+    ))
     conn.commit()
     return True
 
@@ -532,7 +532,7 @@ def insert_comments(conn, comments: list[dict]) -> int:
     for comment in comments:
         # Check if exists
         existing = conn.execute(
-            "SELECT 1 FROM comments WHERE comment_id = ?", [comment['comment_id']]
+            "SELECT 1 FROM comments WHERE comment_id = ?", (comment['comment_id'],)
         ).fetchone()
         
         if not existing:
@@ -541,7 +541,7 @@ def insert_comments(conn, comments: list[dict]) -> int:
                     comment_id, video_id, parent_comment_id, author_display_name,
                     author_channel_id, text, like_count, published_at, updated_at, fetched_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, [
+            """, (
                 comment['comment_id'],
                 comment['video_id'],
                 comment.get('parent_comment_id'),
@@ -552,7 +552,7 @@ def insert_comments(conn, comments: list[dict]) -> int:
                 comment.get('published_at'),
                 comment.get('updated_at'),
                 now
-            ])
+            ))
             new_count += 1
     
     conn.commit()
@@ -574,7 +574,7 @@ def upsert_playlist(conn, playlist: dict) -> None:
             item_count = excluded.item_count,
             privacy_status = excluded.privacy_status,
             updated_at = excluded.updated_at
-    """, [
+    """, (
         playlist['playlist_id'],
         playlist.get('channel_id'),
         playlist.get('title'),
@@ -584,7 +584,7 @@ def upsert_playlist(conn, playlist: dict) -> None:
         playlist.get('item_count'),
         playlist.get('privacy_status'),
         now
-    ])
+    ))
     conn.commit()
 
 
