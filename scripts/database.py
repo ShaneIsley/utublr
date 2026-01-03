@@ -402,12 +402,31 @@ def get_latest_comment_time(conn, video_id: str) -> Optional[datetime]:
     return None
 
 
-def get_videos_needing_comments(conn, channel_id: str, hours_since_last: int = 24) -> list[str]:
+def get_videos_needing_comments(
+    conn, 
+    channel_id: str, 
+    hours_since_last: int = 24,
+    hours_since_last_new: int = 6,
+    new_video_days: int = 7
+) -> list[str]:
     """
     Get video IDs that need comment updates.
-    Prioritizes videos that haven't had comments fetched recently.
+    
+    Uses tiered update frequency:
+    - New videos (< new_video_days old): update every hours_since_last_new hours
+    - Older videos: update every hours_since_last hours
+    
+    Args:
+        channel_id: Channel to check
+        hours_since_last: Hours before re-fetching comments for older videos (default: 24)
+        hours_since_last_new: Hours before re-fetching for new videos (default: 6)
+        new_video_days: Videos younger than this many days are "new" (default: 7)
+    
+    Returns:
+        List of video IDs needing comment updates, newest first
     """
-    result = conn.execute("""
+    # Get new videos (published within new_video_days) needing updates
+    new_videos = conn.execute("""
         SELECT v.video_id 
         FROM videos v
         LEFT JOIN (
@@ -416,11 +435,36 @@ def get_videos_needing_comments(conn, channel_id: str, hours_since_last: int = 2
             GROUP BY video_id
         ) c ON v.video_id = c.video_id
         WHERE v.channel_id = ?
+        AND v.published_at >= datetime('now', '-' || ? || ' days')
         AND (c.last_fetch IS NULL 
              OR datetime(c.last_fetch) < datetime('now', '-' || ? || ' hours'))
         ORDER BY v.published_at DESC
-    """, (channel_id, hours_since_last,)).fetchall()
-    return [row[0] for row in result]
+    """, (channel_id, new_video_days, hours_since_last_new)).fetchall()
+    
+    # Get older videos needing updates (less frequent)
+    older_videos = conn.execute("""
+        SELECT v.video_id 
+        FROM videos v
+        LEFT JOIN (
+            SELECT video_id, MAX(fetched_at) as last_fetch
+            FROM comments
+            GROUP BY video_id
+        ) c ON v.video_id = c.video_id
+        WHERE v.channel_id = ?
+        AND v.published_at < datetime('now', '-' || ? || ' days')
+        AND (c.last_fetch IS NULL 
+             OR datetime(c.last_fetch) < datetime('now', '-' || ? || ' hours'))
+        ORDER BY v.published_at DESC
+    """, (channel_id, new_video_days, hours_since_last)).fetchall()
+    
+    new_ids = [row[0] for row in new_videos]
+    older_ids = [row[0] for row in older_videos]
+    
+    log.debug(f"Videos needing comments: {len(new_ids)} new (<{new_video_days}d), "
+              f"{len(older_ids)} older (>{new_video_days}d)")
+    
+    # Return new videos first (they're more active), then older
+    return new_ids + older_ids
 
 
 def should_update_channel_stats(conn, channel_id: str, hours: int = 6) -> bool:
