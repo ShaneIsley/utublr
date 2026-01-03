@@ -1,6 +1,11 @@
 """
 YouTube API fetcher module.
 Handles all interactions with the YouTube Data API v3.
+
+Features:
+- Retry with exponential backoff for transient errors
+- Rate limiting between requests
+- Data validation
 """
 
 import os
@@ -9,11 +14,16 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from typing import Optional
+from functools import wraps
+from typing import Optional, Callable, Any
 
 import requests
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
+from logger import get_logger
+
+log = get_logger("youtube_api")
 
 # Optional: youtube-transcript-api for easier transcript fetching
 try:
@@ -26,10 +36,146 @@ try:
     TRANSCRIPT_API_AVAILABLE = True
 except ImportError:
     TRANSCRIPT_API_AVAILABLE = False
+    log.warning("youtube-transcript-api not installed, using fallback method")
+
+
+# ============================================================================
+# RETRY LOGIC WITH EXPONENTIAL BACKOFF
+# ============================================================================
+
+RETRYABLE_STATUS_CODES = (429, 500, 502, 503, 504)
+MAX_RETRIES = 3
+BASE_DELAY = 1.0
+MAX_DELAY = 60.0
+
+
+def retry_with_backoff(
+    max_retries: int = MAX_RETRIES,
+    base_delay: float = BASE_DELAY,
+    max_delay: float = MAX_DELAY,
+    exponential_base: float = 2.0,
+):
+    """
+    Decorator for retrying functions with exponential backoff.
+    
+    Retries on:
+    - HTTP 429 (rate limit)
+    - HTTP 5xx (server errors)
+    - Connection errors
+    """
+    def decorator(func: Callable):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                    
+                except HttpError as e:
+                    status_code = e.resp.status if hasattr(e, 'resp') else None
+                    
+                    if status_code in RETRYABLE_STATUS_CODES:
+                        last_exception = e
+                        if attempt < max_retries:
+                            delay = min(base_delay * (exponential_base ** attempt), max_delay)
+                            
+                            # Check for Retry-After header
+                            retry_after = e.resp.get('retry-after') if hasattr(e, 'resp') else None
+                            if retry_after:
+                                try:
+                                    delay = max(delay, float(retry_after))
+                                except ValueError:
+                                    pass
+                            
+                            log.warning(f"HTTP {status_code} error, retrying in {delay:.1f}s "
+                                       f"(attempt {attempt + 1}/{max_retries + 1}): {e}")
+                            time.sleep(delay)
+                            continue
+                    else:
+                        # Non-retryable HTTP error
+                        log.error(f"Non-retryable HTTP error {status_code}: {e}")
+                        raise
+                        
+                except (requests.exceptions.ConnectionError,
+                        requests.exceptions.Timeout,
+                        ConnectionResetError,
+                        TimeoutError) as e:
+                    last_exception = e
+                    if attempt < max_retries:
+                        delay = min(base_delay * (exponential_base ** attempt), max_delay)
+                        log.warning(f"Connection error, retrying in {delay:.1f}s "
+                                   f"(attempt {attempt + 1}/{max_retries + 1}): {e}")
+                        time.sleep(delay)
+                        continue
+                    
+                except Exception as e:
+                    # Non-retryable exception
+                    log.error(f"Non-retryable error in {func.__name__}: {type(e).__name__}: {e}")
+                    raise
+            
+            # All retries exhausted
+            log.error(f"All {max_retries + 1} attempts failed for {func.__name__}")
+            raise last_exception
+        
+        return wrapper
+    return decorator
+
+
+# ============================================================================
+# DATA VALIDATION
+# ============================================================================
+
+def validate_video_data(video: dict) -> dict:
+    """Validate and sanitize video data from API response."""
+    required_fields = ['video_id']
+    
+    for field in required_fields:
+        if not video.get(field):
+            raise ValueError(f"Missing required field: {field}")
+    
+    # Ensure numeric fields are integers
+    stats = video.get('statistics', {})
+    for field in ['view_count', 'like_count', 'comment_count']:
+        if field in stats:
+            try:
+                stats[field] = int(stats[field])
+            except (ValueError, TypeError):
+                stats[field] = 0
+    
+    # Ensure duration is valid
+    duration = video.get('duration_seconds')
+    if duration is not None:
+        try:
+            video['duration_seconds'] = int(duration)
+        except (ValueError, TypeError):
+            video['duration_seconds'] = None
+    
+    return video
+
+
+def validate_channel_data(channel: dict) -> dict:
+    """Validate and sanitize channel data from API response."""
+    required_fields = ['channel_id']
+    
+    for field in required_fields:
+        if not channel.get(field):
+            raise ValueError(f"Missing required field: {field}")
+    
+    # Ensure numeric fields are integers
+    stats = channel.get('statistics', {})
+    for field in ['subscriber_count', 'view_count', 'video_count']:
+        if field in stats:
+            try:
+                stats[field] = int(stats[field])
+            except (ValueError, TypeError):
+                stats[field] = 0
+    
+    return channel
 
 
 class YouTubeFetcher:
-    """Handles fetching data from YouTube API with rate limiting."""
+    """Handles fetching data from YouTube API with rate limiting and retry logic."""
     
     def __init__(self, api_key: str = None, requests_per_second: float = 2.0):
         self.api_key = api_key or os.environ.get("YOUTUBE_API_KEY")
@@ -39,20 +185,27 @@ class YouTubeFetcher:
         self.youtube = build("youtube", "v3", developerKey=self.api_key)
         self.min_request_interval = 1.0 / requests_per_second
         self.last_request_time = 0
+        
+        log.debug(f"YouTubeFetcher initialized, rate limit: {requests_per_second} req/s")
     
     def _rate_limit(self):
         """Enforce rate limiting between API calls."""
         elapsed = time.time() - self.last_request_time
         if elapsed < self.min_request_interval:
-            time.sleep(self.min_request_interval - elapsed)
+            sleep_time = self.min_request_interval - elapsed
+            log.debug(f"Rate limiting: sleeping {sleep_time:.3f}s")
+            time.sleep(sleep_time)
         self.last_request_time = time.time()
     
+    @retry_with_backoff()
     def resolve_channel_id(self, identifier: str) -> str:
         """Resolve various channel identifiers to a channel ID."""
+        log.debug(f"Resolving channel identifier: {identifier}")
         identifier = identifier.strip()
         
         # Direct channel ID
         if identifier.startswith("UC") and len(identifier) == 24:
+            log.debug(f"Direct channel ID: {identifier}")
             return identifier
         
         # Handle (@username)
@@ -64,6 +217,7 @@ class YouTubeFetcher:
         elif "youtube.com/channel/" in identifier:
             match = re.search(r"youtube\.com/channel/(UC[\w-]{22})", identifier)
             if match:
+                log.debug(f"Extracted channel ID from URL: {match.group(1)}")
                 return match.group(1)
             handle = None
         else:
@@ -71,6 +225,7 @@ class YouTubeFetcher:
             handle = identifier
         
         if handle:
+            log.debug(f"Looking up handle: {handle}")
             self._rate_limit()
             request = self.youtube.channels().list(
                 part="id",
@@ -79,12 +234,16 @@ class YouTubeFetcher:
             response = request.execute()
             
             if response.get("items"):
-                return response["items"][0]["id"]
+                channel_id = response["items"][0]["id"]
+                log.debug(f"Resolved handle '{handle}' to channel ID: {channel_id}")
+                return channel_id
         
         raise ValueError(f"Could not resolve channel ID for: {identifier}")
     
+    @retry_with_backoff()
     def fetch_channel(self, channel_id: str) -> dict:
         """Fetch comprehensive channel metadata."""
+        log.debug(f"Fetching channel metadata for: {channel_id}")
         self._rate_limit()
         request = self.youtube.channels().list(
             part="snippet,contentDetails,statistics,topicDetails,brandingSettings",
@@ -104,7 +263,7 @@ class YouTubeFetcher:
         thumbnails = snippet.get("thumbnails", {})
         thumbnail_url = (thumbnails.get("high") or thumbnails.get("default") or {}).get("url")
         
-        return {
+        result = {
             "channel_id": channel_id,
             "title": snippet.get("title"),
             "description": snippet.get("description"),
@@ -122,52 +281,81 @@ class YouTubeFetcher:
                 "video_count": int(statistics.get("videoCount", 0)),
             }
         }
+        
+        log.debug(f"Channel '{result['title']}': {result['statistics']['video_count']} videos")
+        return validate_channel_data(result)
+    
+    @retry_with_backoff()
+    def _fetch_playlist_page(self, playlist_id: str, page_token: str = None) -> dict:
+        """Fetch a single page of playlist items (internal, with retry)."""
+        self._rate_limit()
+        request = self.youtube.playlistItems().list(
+            part="contentDetails",
+            playlistId=playlist_id,
+            maxResults=50,
+            pageToken=page_token
+        )
+        return request.execute()
     
     def fetch_playlist_video_ids(self, playlist_id: str, max_results: int = None) -> list[str]:
         """Fetch all video IDs from a playlist."""
+        log.debug(f"Fetching video IDs from playlist: {playlist_id}")
         video_ids = []
         next_page_token = None
+        page_count = 0
         
         while True:
-            self._rate_limit()
-            request = self.youtube.playlistItems().list(
-                part="contentDetails",
-                playlistId=playlist_id,
-                maxResults=50,
-                pageToken=next_page_token
-            )
-            response = request.execute()
+            response = self._fetch_playlist_page(playlist_id, next_page_token)
+            page_count += 1
             
             for item in response.get("items", []):
                 video_id = item.get("contentDetails", {}).get("videoId")
                 if video_id:
                     video_ids.append(video_id)
                     if max_results and len(video_ids) >= max_results:
+                        log.debug(f"Reached max_results ({max_results}), stopping")
                         return video_ids
             
             next_page_token = response.get("nextPageToken")
             if not next_page_token:
                 break
+            
+            if page_count % 10 == 0:
+                log.debug(f"Playlist fetch progress: {len(video_ids)} videos, page {page_count}")
         
+        log.debug(f"Fetched {len(video_ids)} video IDs from playlist in {page_count} pages")
         return video_ids
+    
+    @retry_with_backoff()
+    def _fetch_videos_batch(self, video_ids: list[str]) -> list[dict]:
+        """Fetch a batch of videos (internal, with retry)."""
+        self._rate_limit()
+        request = self.youtube.videos().list(
+            part="snippet,contentDetails,statistics,status,topicDetails",
+            id=",".join(video_ids)
+        )
+        return request.execute()
     
     def fetch_videos(self, video_ids: list[str]) -> list[dict]:
         """Fetch detailed metadata for videos (handles batching)."""
+        log.debug(f"Fetching metadata for {len(video_ids)} videos")
         all_videos = []
         
         for i in range(0, len(video_ids), 50):
             batch = video_ids[i:i + 50]
-            self._rate_limit()
+            batch_num = i // 50 + 1
+            total_batches = (len(video_ids) + 49) // 50
             
-            request = self.youtube.videos().list(
-                part="snippet,contentDetails,statistics,status,topicDetails",
-                id=",".join(batch)
-            )
-            response = request.execute()
+            log.debug(f"Fetching video batch {batch_num}/{total_batches} ({len(batch)} videos)")
+            
+            response = self._fetch_videos_batch(batch)
             
             for item in response.get("items", []):
                 video = self._parse_video(item)
-                all_videos.append(video)
+                all_videos.append(validate_video_data(video))
+        
+        log.debug(f"Fetched metadata for {len(all_videos)} videos")
+        return all_videos
         
         return all_videos
     
@@ -259,25 +447,50 @@ class YouTubeFetcher:
             elif duration_seconds:
                 chapter["end_seconds"] = duration_seconds
         
+        if chapters:
+            log.debug(f"Parsed {len(chapters)} chapters from description")
+        
         return chapters
     
-    def fetch_comments(self, video_id: str, since: datetime = None, max_results: int = 500) -> list[dict]:
-        """Fetch comments for a video, optionally only newer than `since`."""
+    @retry_with_backoff()
+    def _fetch_comments_page(self, video_id: str, max_results: int, page_token: str = None) -> dict:
+        """Fetch a single page of comments (internal, with retry)."""
+        self._rate_limit()
+        request = self.youtube.commentThreads().list(
+            part="snippet,replies",
+            videoId=video_id,
+            maxResults=min(100, max_results),
+            pageToken=page_token,
+            order="time",
+            textFormat="plainText"
+        )
+        return request.execute()
+    
+    def fetch_comments(
+        self, 
+        video_id: str, 
+        since: datetime = None, 
+        max_results: int = 500,
+        max_replies_per_comment: int = 10
+    ) -> list[dict]:
+        """
+        Fetch comments for a video.
+        
+        Args:
+            video_id: YouTube video ID
+            since: Only fetch comments newer than this time
+            max_results: Maximum total comments to fetch
+            max_replies_per_comment: Limit replies per top-level comment (prevents blowup)
+        """
+        log.debug(f"Fetching comments for video {video_id}, max={max_results}, since={since}")
         comments = []
         next_page_token = None
+        pages_fetched = 0
         
         try:
             while len(comments) < max_results:
-                self._rate_limit()
-                request = self.youtube.commentThreads().list(
-                    part="snippet,replies",
-                    videoId=video_id,
-                    maxResults=min(100, max_results - len(comments)),
-                    pageToken=next_page_token,
-                    order="time",  # Most recent first for incremental
-                    textFormat="plainText"
-                )
-                response = request.execute()
+                response = self._fetch_comments_page(video_id, max_results - len(comments), next_page_token)
+                pages_fetched += 1
                 
                 found_old = False
                 for item in response.get("items", []):
@@ -291,6 +504,7 @@ class YouTubeFetcher:
                             since = since.replace(tzinfo=comment_time.tzinfo)
                         if comment_time <= since:
                             found_old = True
+                            log.debug(f"Reached comment older than cutoff, stopping")
                             break
                     
                     comments.append({
@@ -305,9 +519,10 @@ class YouTubeFetcher:
                         "updated_at": top_comment.get("updatedAt"),
                     })
                     
-                    # Get replies
+                    # Get replies (with limit to prevent blowup on viral comments)
                     if "replies" in item:
-                        for reply in item["replies"]["comments"]:
+                        replies = item["replies"]["comments"][:max_replies_per_comment]
+                        for reply in replies:
                             reply_snippet = reply["snippet"]
                             comments.append({
                                 "comment_id": reply["id"],
@@ -320,6 +535,9 @@ class YouTubeFetcher:
                                 "published_at": reply_snippet.get("publishedAt"),
                                 "updated_at": reply_snippet.get("updatedAt"),
                             })
+                        
+                        if len(item["replies"]["comments"]) > max_replies_per_comment:
+                            log.debug(f"Truncated replies: {len(item['replies']['comments'])} -> {max_replies_per_comment}")
                 
                 if found_old:
                     break
@@ -331,25 +549,33 @@ class YouTubeFetcher:
         except HttpError as e:
             if e.resp.status == 403:
                 # Comments disabled
+                log.debug(f"Comments disabled for video {video_id}")
                 return []
             raise
         
+        log.debug(f"Fetched {len(comments)} comments for video {video_id} in {pages_fetched} pages")
         return comments
+    
+    @retry_with_backoff()
+    def _fetch_playlists_page(self, channel_id: str, page_token: str = None) -> dict:
+        """Fetch a single page of playlists (internal, with retry)."""
+        self._rate_limit()
+        request = self.youtube.playlists().list(
+            part="snippet,contentDetails,status",
+            channelId=channel_id,
+            maxResults=50,
+            pageToken=page_token
+        )
+        return request.execute()
     
     def fetch_playlists(self, channel_id: str) -> list[dict]:
         """Fetch all playlists for a channel."""
+        log.debug(f"Fetching playlists for channel {channel_id}")
         playlists = []
         next_page_token = None
         
         while True:
-            self._rate_limit()
-            request = self.youtube.playlists().list(
-                part="snippet,contentDetails,status",
-                channelId=channel_id,
-                maxResults=50,
-                pageToken=next_page_token
-            )
-            response = request.execute()
+            response = self._fetch_playlists_page(channel_id, next_page_token)
             
             for item in response.get("items", []):
                 snippet = item.get("snippet", {})
@@ -371,6 +597,7 @@ class YouTubeFetcher:
             if not next_page_token:
                 break
         
+        log.debug(f"Fetched {len(playlists)} playlists for channel {channel_id}")
         return playlists
 
 
@@ -380,12 +607,20 @@ class TranscriptFetcher:
     @staticmethod
     def fetch(video_id: str, language: str = "en") -> Optional[dict]:
         """Fetch transcript using best available method."""
+        log.debug(f"Fetching transcript for video {video_id}")
+        
         if TRANSCRIPT_API_AVAILABLE:
             result = TranscriptFetcher._fetch_with_api(video_id, language)
             if result and result.get("available"):
+                log.debug(f"Transcript found: {result.get('transcript_type')}, {result.get('language')}")
                 return result
         
-        return TranscriptFetcher._fetch_fallback(video_id)
+        result = TranscriptFetcher._fetch_fallback(video_id)
+        if result and result.get("available"):
+            log.debug(f"Transcript found via fallback")
+        else:
+            log.debug(f"No transcript available for {video_id}")
+        return result
     
     @staticmethod
     def _fetch_with_api(video_id: str, language: str = "en") -> Optional[dict]:
