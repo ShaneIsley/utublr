@@ -13,6 +13,14 @@ on:
         required: false
         type: boolean
         default: false
+      max_videos:
+        description: 'Max videos per channel (default: unlimited)'
+        required: false
+        type: number
+      max_video_age:
+        description: 'Max video age in days (default: unlimited)'
+        required: false
+        type: number
       skip_comments:
         description: 'Skip fetching comments'
         required: false
@@ -25,11 +33,11 @@ on:
         default: false
   
   # Scheduled runs - 4 times daily
-  #schedule:
-  #  - cron: '0 0 * * *'   # Midnight UTC
-  #  - cron: '0 6 * * *'   # 6 AM UTC
-  #  - cron: '0 12 * * *'  # Noon UTC
-  #  - cron: '0 18 * * *'  # 6 PM UTC
+  schedule:
+    - cron: '0 0 * * *'   # Midnight UTC
+    - cron: '0 6 * * *'   # 6 AM UTC
+    - cron: '0 12 * * *'  # Noon UTC
+    - cron: '0 18 * * *'  # 6 PM UTC
 
 env:
   PYTHON_VERSION: '3.11'
@@ -58,13 +66,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Download existing database
-        uses: actions/download-artifact@v4
-        with:
-          name: youtube-database
-          path: data/
-        continue-on-error: true  # OK if no previous database
-
       - name: Ensure config exists
         run: |
           if [ ! -f "config/channels.yaml" ]; then
@@ -81,6 +82,8 @@ jobs:
         id: fetch
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
         run: |
           cd scripts
           
@@ -96,6 +99,14 @@ jobs:
             CMD="$CMD --backfill"
           fi
           
+          if [ -n "${{ github.event.inputs.max_videos }}" ]; then
+            CMD="$CMD --max-videos ${{ github.event.inputs.max_videos }}"
+          fi
+          
+          if [ -n "${{ github.event.inputs.max_video_age }}" ]; then
+            CMD="$CMD --max-video-age ${{ github.event.inputs.max_video_age }}"
+          fi
+          
           if [ "${{ github.event.inputs.skip_comments }}" == "true" ]; then
             CMD="$CMD --skip-comments"
           fi
@@ -107,15 +118,11 @@ jobs:
           echo "Running: $CMD"
           eval $CMD
 
-      - name: Upload database artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: youtube-database
-          path: data/youtube.duckdb
-          retention-days: 90
-          overwrite: true
-
       - name: Generate summary report
+        if: always()
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
         run: |
           cd scripts
           
@@ -127,56 +134,27 @@ jobs:
           # Summary stats
           echo "### Database Summary" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          python analyze.py --report summary >> $GITHUB_STEP_SUMMARY
+          python analyze.py --report summary >> $GITHUB_STEP_SUMMARY || echo "Could not generate summary"
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           # Channels
           echo "### Tracked Channels" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          python analyze.py --report channels >> $GITHUB_STEP_SUMMARY
+          python analyze.py --report channels >> $GITHUB_STEP_SUMMARY || echo "Could not list channels"
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           # Recent fetch history
           echo "### Recent Fetches" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          python analyze.py --sql "SELECT * FROM fetch_log ORDER BY started_at DESC LIMIT 5" >> $GITHUB_STEP_SUMMARY
+          python analyze.py --report fetch-history >> $GITHUB_STEP_SUMMARY || echo "Could not get fetch history"
           echo '```' >> $GITHUB_STEP_SUMMARY
 
-  # Weekly export to Parquet
-  export:
-    runs-on: ubuntu-latest
-    needs: fetch
-    if: github.event.schedule == '0 0 * * 0'  # Only on Sunday midnight
-    
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Download database
-        uses: actions/download-artifact@v4
-        with:
-          name: youtube-database
-          path: data/
-
-      - name: Export to Parquet
-        run: |
-          cd scripts
-          python fetch.py --export
-
-      - name: Upload Parquet export
+      - name: Upload logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: youtube-parquet-export-${{ github.run_number }}
-          path: exports/
+          name: fetch-logs-${{ github.run_number }}
+          path: scripts/logs/
           retention-days: 30
