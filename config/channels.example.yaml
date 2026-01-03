@@ -13,22 +13,22 @@
 
 channels:
   # Simple format - just the identifier
-  - "@thenewsagents"
+  #- "@thenewsagents"
   - "@samwitteveenai"
   
   # Detailed format with options
-  - identifier: "@bulwarkmedia"
-     max_videos: 500           # Only most recent 500 videos
-     max_video_age_days: 90   # Only videos from last year
-     fetch_comments: true
-     fetch_transcripts: true
+  #- identifier: "@bulwarkmedia"
+  #   max_videos: 500           # Only most recent 500 videos
+  #   max_video_age_days: 90   # Only videos from last year
+  #   fetch_comments: true
+  #   fetch_transcripts: true
   
   # For very large/prolific channels, limit the scope:
-  - identifier: "@TheMajorityReport"
-     max_videos: 500
-     max_video_age_days: 90    # Only last 90 days
-     fetch_comments: true     # Skip comments to save quota
-     fetch_transcripts: true
+  #- identifier: "@TheMajorityReport"
+  #   max_videos: 500
+  #   max_video_age_days: 90    # Only last 90 days
+  #   fetch_comments: true     # Skip comments to save quota
+  #   fetch_transcripts: true
 
 # Global settings (can be overridden per-channel)
 settings:
