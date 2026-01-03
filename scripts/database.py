@@ -222,7 +222,7 @@ def get_last_fetch_time(conn, channel_id: str) -> Optional[datetime]:
         SELECT MAX(completed_at) 
         FROM fetch_log 
         WHERE channel_id = ? AND status = 'completed'
-    """, [channel_id]).fetchone()
+    """, (channel_id,)).fetchone()
     
     if result and result[0]:
         return datetime.fromisoformat(result[0])
@@ -233,7 +233,7 @@ def get_existing_video_ids(conn, channel_id: str) -> set[str]:
     """Get all video IDs already in database for a channel."""
     result = conn.execute("""
         SELECT video_id FROM videos WHERE channel_id = ?
-    """, [channel_id]).fetchall()
+    """, (channel_id,)).fetchall()
     return {row[0] for row in result}
 
 
@@ -253,7 +253,7 @@ def get_videos_needing_stats_update(conn, channel_id: str, hours_since_last: int
         WHERE v.channel_id = ?
         AND (vs.last_fetch IS NULL 
              OR datetime(vs.last_fetch) < datetime('now', '-' || ? || ' hours'))
-    """, [channel_id, hours_since_last]).fetchall()
+    """, (channel_id, hours_since_last,)).fetchall()
     return [row[0] for row in result]
 
 
@@ -264,7 +264,7 @@ def get_videos_without_transcripts(conn, channel_id: str) -> list[str]:
         FROM videos v
         LEFT JOIN transcripts t ON v.video_id = t.video_id
         WHERE v.channel_id = ? AND t.video_id IS NULL
-    """, [channel_id]).fetchall()
+    """, (channel_id,)).fetchall()
     return [row[0] for row in result]
 
 
@@ -272,7 +272,7 @@ def get_latest_comment_time(conn, video_id: str) -> Optional[datetime]:
     """Get the most recent comment timestamp for a video."""
     result = conn.execute("""
         SELECT MAX(published_at) FROM comments WHERE video_id = ?
-    """, [video_id]).fetchone()
+    """, (video_id,)).fetchone()
     
     if result and result[0]:
         return datetime.fromisoformat(result[0].replace('Z', '+00:00'))
@@ -296,7 +296,7 @@ def get_videos_needing_comments(conn, channel_id: str, hours_since_last: int = 2
         AND (c.last_fetch IS NULL 
              OR datetime(c.last_fetch) < datetime('now', '-' || ? || ' hours'))
         ORDER BY v.published_at DESC
-    """, [channel_id, hours_since_last]).fetchall()
+    """, (channel_id, hours_since_last,)).fetchall()
     return [row[0] for row in result]
 
 
@@ -304,7 +304,7 @@ def should_update_channel_stats(conn, channel_id: str, hours: int = 6) -> bool:
     """Check if channel stats should be updated (not updated in last N hours)."""
     result = conn.execute("""
         SELECT MAX(fetched_at) FROM channel_stats WHERE channel_id = ?
-    """, [channel_id]).fetchone()
+    """, (channel_id,)).fetchone()
     
     if not result or not result[0]:
         return True
@@ -324,7 +324,7 @@ def start_fetch_log(conn, channel_id: str, fetch_type: str) -> int:
     conn.execute("""
         INSERT INTO fetch_log (channel_id, fetch_type, started_at, status)
         VALUES (?, ?, ?, 'running')
-    """, [channel_id, fetch_type, now])
+    """, (channel_id, fetch_type, now,))
     conn.commit()
     
     result = conn.execute("SELECT last_insert_rowid()").fetchone()
@@ -345,7 +345,7 @@ def complete_fetch_log(conn, fetch_id: int,
             status = ?,
             errors = ?
         WHERE fetch_id = ?
-    """, [now, videos, comments, transcripts, status, errors, fetch_id])
+    """, (now, videos, comments, transcripts, status, errors, fetch_id,))
     conn.commit()
 
 
@@ -394,13 +394,13 @@ def insert_channel_stats(conn, channel_id: str, stats: dict) -> None:
     conn.execute("""
         INSERT OR IGNORE INTO channel_stats (channel_id, fetched_at, subscriber_count, view_count, video_count)
         VALUES (?, ?, ?, ?, ?)
-    """, [
+    """, (
         channel_id,
         now,
         stats.get('subscriber_count', 0),
         stats.get('view_count', 0),
         stats.get('video_count', 0)
-    ])
+    ,))
     conn.commit()
 
 
@@ -465,30 +465,30 @@ def insert_video_stats(conn, video_id: str, stats: dict) -> None:
     conn.execute("""
         INSERT OR IGNORE INTO video_stats (video_id, fetched_at, view_count, like_count, comment_count)
         VALUES (?, ?, ?, ?, ?)
-    """, [
+    """, (
         video_id,
         now,
         stats.get('view_count', 0),
         stats.get('like_count', 0),
         stats.get('comment_count', 0)
-    ])
+    ,))
     conn.commit()
 
 
 def upsert_chapters(conn, video_id: str, chapters: list[dict]) -> None:
     """Replace chapters for a video."""
-    conn.execute("DELETE FROM chapters WHERE video_id = ?", [video_id])
+    conn.execute("DELETE FROM chapters WHERE video_id = ?", (video_id,))
     for i, chapter in enumerate(chapters):
         conn.execute("""
             INSERT INTO chapters (video_id, chapter_index, title, start_seconds, end_seconds)
             VALUES (?, ?, ?, ?, ?)
-        """, [
+        """, (
             video_id,
             i,
             chapter.get('title'),
             chapter.get('start_seconds'),
             chapter.get('end_seconds')
-        ])
+        ,))
     conn.commit()
 
 
@@ -511,7 +511,7 @@ def insert_transcript(conn, video_id: str, transcript: dict) -> bool:
     conn.execute("""
         INSERT INTO transcripts (video_id, language, language_code, transcript_type, full_text, entries_json, fetched_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, [
+    """, (
         video_id,
         transcript.get('language'),
         transcript.get('language_code'),
@@ -519,7 +519,7 @@ def insert_transcript(conn, video_id: str, transcript: dict) -> bool:
         transcript.get('full_text'),
         entries_json,
         now
-    ])
+    ,))
     conn.commit()
     return True
 
@@ -630,7 +630,7 @@ def get_progress(conn, channel_id: str, fetch_id: int, operation: str) -> Option
     result = conn.execute("""
         SELECT processed_ids, total_count FROM fetch_progress
         WHERE channel_id = ? AND fetch_id = ? AND operation = ?
-    """, [channel_id, fetch_id, operation]).fetchone()
+    """, (channel_id, fetch_id, operation,)).fetchone()
     
     if result:
         processed_ids = set(json.loads(result[0])) if result[0] else set()
@@ -654,7 +654,7 @@ def save_progress(conn, channel_id: str, fetch_id: int, operation: str,
             processed_ids = excluded.processed_ids,
             total_count = excluded.total_count,
             last_updated = excluded.last_updated
-    """, [channel_id, fetch_id, operation, processed_json, total_count, now])
+    """, (channel_id, fetch_id, operation, processed_json, total_count, now,))
     conn.commit()
 
 
@@ -664,12 +664,12 @@ def clear_progress(conn, channel_id: str, fetch_id: int, operation: str = None) 
         conn.execute("""
             DELETE FROM fetch_progress 
             WHERE channel_id = ? AND fetch_id = ? AND operation = ?
-        """, [channel_id, fetch_id, operation])
+        """, (channel_id, fetch_id, operation,))
     else:
         conn.execute("""
             DELETE FROM fetch_progress 
             WHERE channel_id = ? AND fetch_id = ?
-        """, [channel_id, fetch_id])
+        """, (channel_id, fetch_id,))
     conn.commit()
 
 
@@ -681,7 +681,7 @@ def get_all_video_ids_for_channel(conn, channel_id: str) -> set[str]:
     """Get all video IDs we have stored for a channel."""
     result = conn.execute("""
         SELECT video_id FROM videos WHERE channel_id = ?
-    """, [channel_id]).fetchall()
+    """, (channel_id,)).fetchall()
     return {row[0] for row in result}
 
 
@@ -701,7 +701,7 @@ def mark_videos_as_deleted(conn, video_ids: list[str]) -> int:
             UPDATE videos 
             SET privacy_status = 'deleted', updated_at = ?
             WHERE video_id = ?
-        """, [now, video_id])
+        """, (now, video_id,))
         count += 1
     
     conn.commit()
@@ -715,7 +715,7 @@ def get_deleted_videos(conn, channel_id: str = None) -> list[dict]:
             SELECT video_id, title, channel_id, updated_at 
             FROM videos 
             WHERE privacy_status = 'deleted' AND channel_id = ?
-        """, [channel_id]).fetchall()
+        """, (channel_id,)).fetchall()
     else:
         result = conn.execute("""
             SELECT video_id, title, channel_id, updated_at 
@@ -740,13 +740,13 @@ def purge_deleted_videos(conn, channel_id: str = None, older_than_days: int = 30
             WHERE privacy_status = 'deleted' 
             AND channel_id = ? 
             AND updated_at < ?
-        """, [channel_id, cutoff]).fetchall()
+        """, (channel_id, cutoff,)).fetchall()
     else:
         result = conn.execute("""
             SELECT video_id FROM videos 
             WHERE privacy_status = 'deleted' 
             AND updated_at < ?
-        """, [cutoff]).fetchall()
+        """, (cutoff,)).fetchall()
     
     video_ids = [r[0] for r in result]
     
@@ -755,11 +755,11 @@ def purge_deleted_videos(conn, channel_id: str = None, older_than_days: int = 30
     
     # Delete from all related tables
     for video_id in video_ids:
-        conn.execute("DELETE FROM video_stats WHERE video_id = ?", [video_id])
-        conn.execute("DELETE FROM chapters WHERE video_id = ?", [video_id])
-        conn.execute("DELETE FROM transcripts WHERE video_id = ?", [video_id])
-        conn.execute("DELETE FROM comments WHERE video_id = ?", [video_id])
-        conn.execute("DELETE FROM videos WHERE video_id = ?", [video_id])
+        conn.execute("DELETE FROM video_stats WHERE video_id = ?", (video_id,))
+        conn.execute("DELETE FROM chapters WHERE video_id = ?", (video_id,))
+        conn.execute("DELETE FROM transcripts WHERE video_id = ?", (video_id,))
+        conn.execute("DELETE FROM comments WHERE video_id = ?", (video_id,))
+        conn.execute("DELETE FROM videos WHERE video_id = ?", (video_id,))
     
     conn.commit()
     return len(video_ids)
