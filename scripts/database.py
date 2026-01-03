@@ -5,17 +5,137 @@ Uses Turso (libSQL) for persistent cloud storage.
 Supports:
 - Remote Turso database (recommended for production)
 - Local SQLite file (for development/testing)
+
+Features:
+- Automatic retry with exponential backoff for transient errors
+- Connection wrapper for resilient database operations
 """
 
 import json
 import os
+import time
 from datetime import datetime
-from typing import Optional
+from functools import wraps
+from typing import Optional, Callable, Any
+
+# Try to import logger, fall back to print if not available
+try:
+    from logger import get_logger
+    log = get_logger("database")
+except ImportError:
+    import logging
+    log = logging.getLogger("database")
+
+
+# ============================================================================
+# RETRY LOGIC FOR TURSO DATABASE OPERATIONS
+# ============================================================================
+
+# Turso-specific error patterns that are retryable
+RETRYABLE_ERROR_PATTERNS = [
+    "502 Bad Gateway",
+    "503 Service Unavailable", 
+    "504 Gateway Timeout",
+    "Connection reset",
+    "Connection refused",
+    "Connection timed out",
+    "Temporary failure",
+    "Too many requests",
+    "SQLITE_BUSY",
+    "database is locked",
+]
+
+# Retry configuration optimized for Turso free tier
+DB_MAX_RETRIES = 5
+DB_BASE_DELAY = 1.0  # Start with 1 second
+DB_MAX_DELAY = 30.0  # Cap at 30 seconds
+DB_EXPONENTIAL_BASE = 2.0
+
+
+def is_retryable_error(error: Exception) -> bool:
+    """Check if an error is retryable based on known patterns."""
+    error_str = str(error).lower()
+    for pattern in RETRYABLE_ERROR_PATTERNS:
+        if pattern.lower() in error_str:
+            return True
+    return False
+
+
+def retry_db_operation(
+    max_retries: int = DB_MAX_RETRIES,
+    base_delay: float = DB_BASE_DELAY,
+    max_delay: float = DB_MAX_DELAY,
+):
+    """
+    Decorator for retrying database operations with exponential backoff.
+    
+    Handles Turso-specific transient errors like 502, 503, connection issues.
+    """
+    def decorator(func: Callable):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if is_retryable_error(e):
+                        last_exception = e
+                        if attempt < max_retries:
+                            delay = min(base_delay * (DB_EXPONENTIAL_BASE ** attempt), max_delay)
+                            log.warning(f"Database error (attempt {attempt + 1}/{max_retries + 1}), "
+                                       f"retrying in {delay:.1f}s: {e}")
+                            time.sleep(delay)
+                            continue
+                        else:
+                            log.error(f"Database operation failed after {max_retries + 1} attempts: {e}")
+                    else:
+                        # Non-retryable error
+                        log.error(f"Non-retryable database error: {e}")
+                        raise
+            
+            # All retries exhausted
+            raise last_exception
+        
+        return wrapper
+    return decorator
+
+
+class TursoConnection:
+    """
+    Wrapper around libsql connection with automatic retry logic.
+    
+    Provides resilient execute() and commit() methods that handle
+    transient Turso errors with exponential backoff.
+    """
+    
+    def __init__(self, conn):
+        self._conn = conn
+        self._in_transaction = False
+    
+    @retry_db_operation()
+    def execute(self, sql: str, parameters: tuple = None):
+        """Execute SQL with automatic retry on transient errors."""
+        if parameters:
+            return self._conn.execute(sql, parameters)
+        return self._conn.execute(sql)
+    
+    @retry_db_operation()
+    def commit(self):
+        """Commit transaction with automatic retry."""
+        return self._conn.commit()
+    
+    def __getattr__(self, name):
+        """Delegate other attributes to underlying connection."""
+        return getattr(self._conn, name)
 
 
 def get_connection():
     """
-    Get a connection to the database.
+    Get a resilient connection to the database.
+    
+    Returns a TursoConnection wrapper that handles transient errors.
     
     Environment variables:
     - TURSO_DATABASE_URL: libsql://your-db.turso.io (or file:local.db for local)
@@ -25,6 +145,8 @@ def get_connection():
     
     url = os.environ.get("TURSO_DATABASE_URL", "file:data/youtube.db")
     auth_token = os.environ.get("TURSO_AUTH_TOKEN", "")
+    
+    log.debug(f"Connecting to database: {url[:30]}...")
     
     if url.startswith("libsql://") or url.startswith("https://"):
         # Remote Turso database
@@ -37,7 +159,8 @@ def get_connection():
             os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
         conn = libsql.connect(database=url)
     
-    return conn
+    # Wrap in TursoConnection for retry logic
+    return TursoConnection(conn)
 
 
 def init_database(conn) -> None:
