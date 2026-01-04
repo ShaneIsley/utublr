@@ -323,6 +323,16 @@ def init_database(conn) -> None:
         )
     """)
     
+    # Quota tracking (persists across runs)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS quota_usage (
+            date TEXT PRIMARY KEY,
+            used INTEGER,
+            operations TEXT,
+            last_updated TEXT
+        )
+    """)
+    
     # Create indexes
     conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_channel ON videos(channel_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_published ON videos(published_at)")
@@ -332,6 +342,56 @@ def init_database(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_published ON comments(published_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_channel_stats_fetched ON channel_stats(fetched_at)")
     
+    conn.commit()
+
+
+# ============================================================================
+# QUOTA TRACKING - Persist across runs
+# ============================================================================
+
+def get_quota_usage(conn, date_str: str) -> Optional[dict]:
+    """
+    Get quota usage for a specific date from database.
+    
+    Args:
+        conn: Database connection
+        date_str: Date in ISO format (YYYY-MM-DD)
+    
+    Returns:
+        Dict with 'used' and 'operations' or None if not found
+    """
+    result = conn.execute("""
+        SELECT used, operations FROM quota_usage WHERE date = ?
+    """, (date_str,)).fetchone()
+    
+    if result:
+        import json
+        return {
+            'used': result[0],
+            'operations': json.loads(result[1]) if result[1] else {}
+        }
+    return None
+
+
+def save_quota_usage(conn, date_str: str, used: int, operations: dict) -> None:
+    """
+    Save quota usage to database.
+    
+    Args:
+        conn: Database connection
+        date_str: Date in ISO format (YYYY-MM-DD)
+        used: Total quota units used
+        operations: Dict of operation -> units used
+    """
+    import json
+    conn.execute("""
+        INSERT INTO quota_usage (date, used, operations, last_updated)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(date) DO UPDATE SET
+            used = excluded.used,
+            operations = excluded.operations,
+            last_updated = excluded.last_updated
+    """, (date_str, used, json.dumps(operations), datetime.now().isoformat()))
     conn.commit()
 
 
