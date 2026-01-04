@@ -7,9 +7,9 @@ A production-ready system for tracking YouTube channel metadata over time using 
 - **Multi-channel tracking** - Monitor dozens of channels from a single config file
 - **Smart incremental updates** - Only fetches new/changed data to minimize API usage
 - **Turso cloud database** - No more artifact uploads; data persists reliably
-- **Quota tracking** - Monitors API usage, warns before exhaustion
+- **Quota tracking** - Monitors API usage across runs, warns before exhaustion
 - **Checkpointing** - Resume interrupted fetches from where they left off
-- **Retry with backoff** - Handles transient API errors gracefully
+- **Retry with backoff** - Handles transient API/database errors gracefully
 - **Dry-run mode** - Preview what would be fetched without using quota
 - **Deletion detection** - Tracks when videos are removed from channels
 - **Detailed logging** - DEBUG logs to file for troubleshooting
@@ -59,11 +59,16 @@ python fetch.py --config ../config/channels.yaml --dry-run
 
 # Actual fetch
 python fetch.py --config ../config/channels.yaml --backfill
+
+# Fetch transcripts locally (YouTube blocks cloud IPs)
+python fetch_transcripts.py --channel @YourChannel
 ```
 
-## CLI Reference
+## Scripts
 
-### fetch.py
+### fetch.py - Main Data Fetcher (runs in CI/cloud)
+
+Fetches channel metadata, video info, stats, and comments via YouTube API.
 
 ```bash
 # Basic usage
@@ -81,24 +86,76 @@ python fetch.py --channel @GoogleDevelopers \
     --max-videos 500 \
     --max-video-age 90 \
     --max-comments 100 \
-    --max-replies 10 \
-    --batch-size 10
+    --max-replies 10
 
-# Skip expensive operations
-python fetch.py --config ../config/channels.yaml \
-    --skip-comments \
-    --skip-transcripts
-
-# Control update frequency
-python fetch.py --config ../config/channels.yaml \
-    --stats-update-hours 6 \
-    --comments-update-hours 24
+# Skip comments to save quota
+python fetch.py --config ../config/channels.yaml --skip-comments
 
 # Export to CSV
 python fetch.py --export
 ```
 
-### Command Line Options
+### fetch_transcripts.py - Transcript Fetcher (run locally)
+
+Fetches video transcripts. **Must be run locally** because YouTube blocks 
+transcript requests from cloud/CI IP addresses.
+
+```bash
+# Fetch all missing transcripts
+python fetch_transcripts.py
+
+# Fetch for specific channel
+python fetch_transcripts.py --channel @samwitteveenai
+python fetch_transcripts.py --channel UC55ODQSvARtgSyc8ThfiepQ
+
+# Fetch specific videos
+python fetch_transcripts.py --video VIDEO_ID1 VIDEO_ID2
+
+# Limit number to fetch
+python fetch_transcripts.py --limit 100
+
+# Slower rate limiting (default: 1 req/sec)
+python fetch_transcripts.py --delay 2.0
+
+# Test mode (don't save to database)
+python fetch_transcripts.py --dry-run --limit 10
+```
+
+### analyse.py - Reports and Analysis
+
+```bash
+# List available reports
+python analyse.py --list-reports
+
+# Run preset reports
+python analyse.py --report summary
+python analyse.py --report channels
+python analyse.py --report growth
+python analyse.py --report top-videos
+
+# Custom SQL
+python analyse.py --sql "SELECT title, view_count FROM videos ORDER BY view_count DESC LIMIT 10"
+
+# Export to CSV
+python analyse.py --report growth --output growth.csv
+```
+
+### test_transcript.py - Transcript Debugging
+
+```bash
+# Test specific video
+python test_transcript.py VIDEO_ID
+
+# Test videos from a channel
+python test_transcript.py --channel @samwitteveenai --limit 20
+
+# Quick summary only
+python test_transcript.py --channel @samwitteveenai --limit 50 --quiet
+```
+
+## Command Line Options
+
+### fetch.py
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -110,33 +167,26 @@ python fetch.py --export
 | `--max-videos` | unlimited | Max videos per channel |
 | `--max-video-age` | unlimited | Only fetch videos within N days |
 | `--max-comments` | 100 | Max comments per video |
-| `--max-replies` | 10 | Max replies per comment (prevents blowup) |
+| `--max-replies` | 10 | Max replies per comment |
 | `--batch-size` | 10 | Videos per batch/commit |
 | `--stats-update-hours` | 6 | Skip stats if updated within N hours |
 | `--comments-update-hours` | 24 | Skip comments if fetched within N hours |
+| `--comments-update-hours-new` | 6 | Comment update frequency for new videos |
+| `--new-video-days` | 7 | Videos younger than this are "new" |
 | `--max-runtime-minutes` | 300 | Stop after N minutes |
 | `--quota-limit` | 10000 | Daily API quota limit |
 | `--skip-comments` | false | Don't fetch comments |
-| `--skip-transcripts` | false | Don't fetch transcripts |
 
-### analyze.py
+### fetch_transcripts.py
 
-```bash
-# List available reports
-python analyze.py --list-reports
-
-# Run preset reports
-python analyze.py --report summary
-python analyze.py --report channels
-python analyze.py --report growth
-python analyze.py --report top-videos
-
-# Custom SQL
-python analyze.py --sql "SELECT title, view_count FROM videos ORDER BY view_count DESC LIMIT 10"
-
-# Export to CSV
-python analyze.py --report growth --output growth.csv
-```
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--channel` | - | Channel ID or @handle to filter by |
+| `--video` | - | Specific video ID(s) to fetch |
+| `--limit` | unlimited | Max videos to process |
+| `--delay` | 1.0 | Seconds between requests |
+| `--dry-run` | false | Don't save to database |
+| `--quiet` | false | Only show summary |
 
 ## Smart Incremental Fetching
 
@@ -147,16 +197,17 @@ The system minimizes redundant API requests:
 | Channel stats | Every 6 hours | Updated within `--stats-update-hours` |
 | Video metadata | Only new videos | Video already in DB |
 | Video stats | Stale videos only | Updated within `--stats-update-hours` |
-| Transcripts | Once per video | Already have transcript |
-| Comments | Stale videos only | Fetched within `--comments-update-hours` |
+| Comments (old videos) | Every 24 hours | Fetched within `--comments-update-hours` |
+| Comments (new videos) | Every 6 hours | Fetched within `--comments-update-hours-new` |
+| Transcripts | Manual, local only | Run `fetch_transcripts.py` locally |
 
 ## Error Handling
 
 ### Retry Logic
-All API calls retry up to 3 times with exponential backoff for:
+All API and database calls retry up to 3-5 times with exponential backoff for:
 - HTTP 429 (rate limit)
 - HTTP 500/502/503/504 (server errors)
-- Connection errors
+- Database connection errors (Turso 502, stream not found, etc.)
 
 ### Checkpointing
 Progress is saved after each batch. If a run fails:
@@ -165,7 +216,7 @@ Progress is saved after each batch. If a run fails:
 3. No duplicate work or data loss
 
 ### Quota Protection
-- Tracks quota usage across runs (persisted to file)
+- Tracks quota usage across runs (persisted to database)
 - Warns at 80% usage
 - Aborts at 95% usage
 - Estimates cost before fetching each channel
@@ -178,17 +229,6 @@ Logs are written to `scripts/logs/` with DEBUG level:
 logs/
 ├── fetch_20250103_143052.log  # Timestamped log files
 └── latest.log                  # Symlink to most recent
-```
-
-Log format:
-```
-2025-01-03 14:30:52 | DEBUG    | youtube_api:fetch_channel:245 | Fetching channel metadata for: UCxyz...
-```
-
-Set log levels via environment:
-```bash
-export LOG_LEVEL=DEBUG          # File log level (default: DEBUG)
-export CONSOLE_LOG_LEVEL=INFO   # Console log level (default: INFO)
 ```
 
 ## GitHub Actions Setup
@@ -206,6 +246,9 @@ export CONSOLE_LOG_LEVEL=INFO   # Console log level (default: INFO)
 - Logs uploaded as artifacts
 - Summary report in Actions UI
 
+**Note:** Transcripts cannot be fetched in GitHub Actions (YouTube blocks cloud IPs).
+Run `fetch_transcripts.py` locally after the automated fetch completes.
+
 ## Database Schema
 
 ### Core Tables
@@ -221,14 +264,8 @@ comments        -- All comments with threading
 playlists       -- Channel playlists
 fetch_log       -- Run history
 fetch_progress  -- Resume checkpoints
+quota_usage     -- API quota tracking
 ```
-
-### Deleted Video Handling
-
-When a video is no longer in a channel's uploads:
-1. Marked as `privacy_status = 'deleted'`
-2. Stats/comments preserved for analysis
-3. Can be purged after N days if desired
 
 ## API Quota Management
 
@@ -246,7 +283,7 @@ YouTube Data API v3 quota: **10,000 units/day** (default)
 **Typical usage per channel:**
 - Basic fetch (100 videos): ~10 units
 - With comments: ~100-500 units
-- Transcripts: 0 (doesn't use API)
+- Transcripts: 0 (doesn't use YouTube API)
 
 ## Configuration
 
@@ -263,15 +300,26 @@ channels:
     max_videos: 1000
     max_video_age_days: 90
     fetch_comments: false
-    fetch_transcripts: true
+    comments_update_hours: 12
+    comments_update_hours_new: 2
+
+settings:
+  comments_update_hours: 24      # Default for older videos
+  comments_update_hours_new: 6   # Default for new videos
+  new_video_days: 7              # Videos < 7 days old are "new"
 ```
 
 ## Troubleshooting
 
 ### "Quota exhausted"
-- Check `data/quota_state.json` for current usage
-- Wait until midnight Pacific time for reset
+- Quota is tracked in the database and resets at midnight
 - Use `--skip-comments` to reduce usage
+- Check usage with `python analyse.py --report summary`
+
+### "All transcripts unavailable"
+- Transcripts must be fetched locally, not from CI/cloud
+- Run `python fetch_transcripts.py` from your local machine
+- Use `--dry-run` to test before saving
 
 ### "YOUTUBE_API_KEY not provided"
 - Ensure environment variable is set
