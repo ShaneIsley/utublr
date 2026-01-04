@@ -351,10 +351,23 @@ def fetch_channel_data(
                 transcript_progress = get_progress(conn, channel_id, fetch_id, 'transcripts')
                 if transcript_progress:
                     processed_transcript_ids = transcript_progress['processed_ids']
-                    videos_needing_transcripts = [v for v in videos_needing_transcripts 
-                                                  if v not in processed_transcript_ids]
+                    remaining = [v for v in videos_needing_transcripts 
+                                 if v not in processed_transcript_ids]
+                    if len(remaining) < len(videos_needing_transcripts):
+                        log.info(f"Resuming from checkpoint: {len(processed_transcript_ids)} already processed, "
+                                f"{len(remaining)} remaining")
+                    videos_needing_transcripts = remaining
                 else:
                     processed_transcript_ids = set()
+                
+                # Track stats for logging
+                transcript_stats = {
+                    "found": 0,
+                    "not_available": 0,
+                    "disabled": 0,
+                    "errors": 0
+                }
+                total_to_process = len(videos_needing_transcripts)
                 
                 for i, video_id in enumerate(videos_needing_transcripts):
                     # Check time budget periodically
@@ -366,23 +379,40 @@ def fetch_channel_data(
                         if transcript and transcript.get("available"):
                             if insert_transcript(conn, video_id, transcript):
                                 stats["transcripts_fetched"] += 1
+                                transcript_stats["found"] += 1
                                 log.debug(f"Transcript saved for {video_id}")
+                        else:
+                            # Track why transcript wasn't available
+                            reason = transcript.get("reason", "unknown") if transcript else "fetch failed"
+                            if "disabled" in reason.lower():
+                                transcript_stats["disabled"] += 1
+                            else:
+                                transcript_stats["not_available"] += 1
+                            log.debug(f"No transcript for {video_id}: {reason}")
                         
                         processed_transcript_ids.add(video_id)
                         
-                        # Checkpoint every 10
-                        if (i + 1) % 10 == 0:
+                        # Checkpoint and log progress every 50 videos
+                        if (i + 1) % 50 == 0:
                             save_progress(conn, channel_id, fetch_id, 'transcripts',
-                                         processed_transcript_ids, len(videos_needing_transcripts))
-                            log.debug(f"Transcript progress: {i + 1}/{len(videos_needing_transcripts)}")
+                                         processed_transcript_ids, total_to_process)
+                            log.info(f"Transcript progress: {i + 1}/{total_to_process} "
+                                    f"({transcript_stats['found']} found, "
+                                    f"{transcript_stats['not_available']} unavailable, "
+                                    f"{transcript_stats['disabled']} disabled)")
                         
                     except Exception as e:
+                        transcript_stats["errors"] += 1
                         log.warning(f"Transcript fetch failed for {video_id}: {e}")
                         stats["errors"].append(f"Transcript {video_id}: {str(e)}")
+                        processed_transcript_ids.add(video_id)  # Don't retry on error
                 
-                log.info(f"Fetched {stats['transcripts_fetched']} new transcripts")
+                log.info(f"Transcripts complete: {transcript_stats['found']} found, "
+                        f"{transcript_stats['not_available']} unavailable, "
+                        f"{transcript_stats['disabled']} disabled, "
+                        f"{transcript_stats['errors']} errors")
             else:
-                log.debug("All videos have transcripts")
+                log.info("All videos already have transcripts")
         
         # ================================================================
         # COMMENTS - Only for videos needing updates
