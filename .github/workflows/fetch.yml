@@ -26,11 +26,6 @@ on:
         required: false
         type: boolean
         default: false
-      skip_transcripts:
-        description: 'Skip fetching transcripts'
-        required: false
-        type: boolean
-        default: false
   
   # Scheduled runs - 4 times daily
   schedule:
@@ -111,10 +106,6 @@ jobs:
             CMD="$CMD --skip-comments"
           fi
           
-          if [ "${{ github.event.inputs.skip_transcripts }}" == "true" ]; then
-            CMD="$CMD --skip-transcripts"
-          fi
-          
           echo "Running: $CMD"
           eval $CMD
 
@@ -129,6 +120,8 @@ jobs:
           echo "## YouTube Fetch Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Run time:** $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Note:** Transcripts must be fetched locally with \`fetch_transcripts.py\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           # Summary stats
