@@ -645,16 +645,31 @@ class TranscriptFetcher:
             transcript = None
             transcript_info = {}
             
-            # Try to find English transcript (manual or generated)
+            # First, try to find a manually created English transcript
             try:
-                transcript = transcript_list.find_transcript([language, 'en', 'en-US', 'en-GB'])
-                transcript_info = {
-                    "transcript_type": "auto-generated" if transcript.is_generated else "manual",
-                    "language": transcript.language,
-                    "language_code": transcript.language_code
-                }
-            except NoTranscriptFound:
-                pass
+                for t in transcript_list:
+                    if not t.is_generated and t.language_code in [language, 'en', 'en-US', 'en-GB']:
+                        transcript = t
+                        transcript_info = {
+                            "transcript_type": "manual",
+                            "language": transcript.language,
+                            "language_code": transcript.language_code
+                        }
+                        break
+            except Exception as e:
+                log.debug(f"Manual transcript search failed: {e}")
+            
+            # Fall back to auto-generated English transcript
+            if not transcript:
+                try:
+                    transcript = transcript_list.find_transcript([language, 'en', 'en-US', 'en-GB'])
+                    transcript_info = {
+                        "transcript_type": "auto-generated" if transcript.is_generated else "manual",
+                        "language": transcript.language,
+                        "language_code": transcript.language_code
+                    }
+                except NoTranscriptFound:
+                    pass
             
             # Try translating any available transcript to English
             if not transcript:
