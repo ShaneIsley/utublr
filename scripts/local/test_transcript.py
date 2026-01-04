@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script to debug transcript fetching.
+Test script to debug transcript fetching with youtube-transcript-api v1.x.
 
 Usage:
     python test_transcript.py VIDEO_ID [VIDEO_ID2 ...]
@@ -20,9 +20,9 @@ try:
     from youtube_transcript_api import YouTubeTranscriptApi
     from youtube_transcript_api._errors import (
         NoTranscriptFound,
+        NoTranscriptAvailable,
         TranscriptsDisabled,
         VideoUnavailable,
-        NoTranscriptAvailable,
     )
     print("✓ youtube-transcript-api imported successfully")
 except ImportError as e:
@@ -46,7 +46,7 @@ TEST_VIDEOS = [
 
 def test_video(video_id: str, description: str = "", verbose: bool = True) -> dict:
     """
-    Test transcript fetching for a single video.
+    Test transcript fetching for a single video using v1.x API.
     
     Returns dict with:
         - success: bool
@@ -67,7 +67,7 @@ def test_video(video_id: str, description: str = "", verbose: bool = True) -> di
         print(f"\n--- Testing: {video_id} ({description}) ---")
     
     try:
-        # Create API instance (new v1.x API)
+        # Create API instance (v1.x pattern)
         api = YouTubeTranscriptApi()
         
         # List available transcripts
@@ -79,7 +79,7 @@ def test_video(video_id: str, description: str = "", verbose: bool = True) -> di
                 "language": t.language,
                 "language_code": t.language_code,
                 "is_generated": t.is_generated,
-                "is_translatable": bool(t.translation_languages),
+                "is_translatable": t.is_translatable,
             })
         
         if verbose:
@@ -89,62 +89,61 @@ def test_video(video_id: str, description: str = "", verbose: bool = True) -> di
                       f"{'auto-generated' if t['is_generated'] else 'manual'}, "
                       f"translatable: {t['is_translatable']}")
         
-        # Try to find manual English transcript first
-        manual_transcript = None
-        for t in transcript_list:
-            if not t.is_generated and t.language_code in ['en', 'en-US', 'en-GB']:
-                manual_transcript = t
-                break
-        
-        if manual_transcript:
+        # Strategy 1: Try manually created transcript
+        try:
+            transcript = transcript_list.find_manually_created_transcript(['en', 'en-US', 'en-GB'])
             if verbose:
-                print(f"✓ Found MANUAL English transcript ({manual_transcript.language_code})")
-            data = manual_transcript.fetch()
+                print(f"✓ Found MANUAL transcript ({transcript.language_code})")
+            fetched = transcript.fetch()
             result["success"] = True
-            result["reason"] = f"Manual transcript ({manual_transcript.language_code})"
+            result["reason"] = f"Manual transcript ({transcript.language_code})"
             result["transcript_type"] = "manual"
             if verbose:
-                print(f"  Entries: {len(data)}")
-                if data:
-                    print(f"  First entry: {data[0].text[:50]}...")
-            return result
-        
-        # Fall back to any English transcript (including auto-generated)
-        try:
-            transcript = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
-            if verbose:
-                print(f"✓ Found {'auto-generated' if transcript.is_generated else 'manual'} English transcript")
-            data = transcript.fetch()
-            result["success"] = True
-            result["reason"] = f"{'Auto-generated' if transcript.is_generated else 'Manual'} ({transcript.language_code})"
-            result["transcript_type"] = "auto-generated" if transcript.is_generated else "manual"
-            if verbose:
-                print(f"  Entries: {len(data)}")
-                if data:
-                    print(f"  First entry: {data[0].text[:50]}...")
+                print(f"  Snippets: {len(fetched)}")
+                raw = fetched.to_raw_data()
+                if raw:
+                    print(f"  First: {raw[0]['text'][:50]}...")
             return result
         except NoTranscriptFound:
             if verbose:
-                print("  No direct English transcript")
+                print("  No manual English transcript")
         
-        # Try translation
+        # Strategy 2: Try auto-generated transcript
+        try:
+            transcript = transcript_list.find_generated_transcript(['en', 'en-US', 'en-GB'])
+            if verbose:
+                print(f"✓ Found AUTO-GENERATED transcript ({transcript.language_code})")
+            fetched = transcript.fetch()
+            result["success"] = True
+            result["reason"] = f"Auto-generated transcript ({transcript.language_code})"
+            result["transcript_type"] = "auto-generated"
+            if verbose:
+                print(f"  Snippets: {len(fetched)}")
+                raw = fetched.to_raw_data()
+                if raw:
+                    print(f"  First: {raw[0]['text'][:50]}...")
+            return result
+        except NoTranscriptFound:
+            if verbose:
+                print("  No auto-generated English transcript")
+        
+        # Strategy 3: Try translation
         for t in transcript_list:
-            if t.translation_languages:
-                en_available = any(
-                    lang.get('language_code', '').startswith('en') 
-                    for lang in t.translation_languages
-                )
-                if en_available:
+            if t.is_translatable:
+                try:
                     translated = t.translate('en')
                     if verbose:
-                        print(f"✓ Found translatable transcript from {t.language}")
-                    data = translated.fetch()
+                        print(f"✓ Found TRANSLATABLE transcript from {t.language}")
+                    fetched = translated.fetch()
                     result["success"] = True
                     result["reason"] = f"Translated from {t.language}"
                     result["transcript_type"] = "translated"
                     if verbose:
-                        print(f"  Entries: {len(data)}")
+                        print(f"  Snippets: {len(fetched)}")
                     return result
+                except Exception as e:
+                    if verbose:
+                        print(f"  Translation failed: {e}")
         
         result["reason"] = "No English transcript and no translatable transcripts"
         result["error_type"] = "no_english"
@@ -234,7 +233,7 @@ def get_channel_videos(channel_id: str, limit: int = 20) -> list:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test transcript fetching")
+    parser = argparse.ArgumentParser(description="Test transcript fetching with v1.x API")
     parser.add_argument("video_ids", nargs="*", help="Video IDs to test")
     parser.add_argument("--channel", "-c", help="Channel ID or @handle to test")
     parser.add_argument("--limit", "-l", type=int, default=20, help="Number of videos to test from channel")
