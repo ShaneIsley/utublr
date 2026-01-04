@@ -604,6 +604,16 @@ class YouTubeFetcher:
 class TranscriptFetcher:
     """Handles fetching video transcripts."""
     
+    # Singleton API instance (reuse for efficiency)
+    _api_instance = None
+    
+    @classmethod
+    def _get_api(cls):
+        """Get or create the YouTubeTranscriptApi instance."""
+        if cls._api_instance is None and TRANSCRIPT_API_AVAILABLE:
+            cls._api_instance = YouTubeTranscriptApi()
+        return cls._api_instance
+    
     @staticmethod
     def fetch(video_id: str, language: str = "en") -> Optional[dict]:
         """Fetch transcript using best available method."""
@@ -624,50 +634,49 @@ class TranscriptFetcher:
     
     @staticmethod
     def _fetch_with_api(video_id: str, language: str = "en") -> Optional[dict]:
-        """Fetch transcript using youtube-transcript-api library."""
+        """Fetch transcript using youtube-transcript-api library (v1.x API)."""
         try:
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            api = TranscriptFetcher._get_api()
+            if api is None:
+                return {"available": False, "reason": "Transcript API not available"}
+            
+            transcript_list = api.list(video_id)
             
             transcript = None
             transcript_info = {}
             
-            # Try manually created English transcript
+            # Try to find English transcript (manual or generated)
             try:
-                transcript = transcript_list.find_manually_created_transcript([language, 'en', 'en-US', 'en-GB'])
+                transcript = transcript_list.find_transcript([language, 'en', 'en-US', 'en-GB'])
                 transcript_info = {
-                    "transcript_type": "manual",
+                    "transcript_type": "auto-generated" if transcript.is_generated else "manual",
                     "language": transcript.language,
                     "language_code": transcript.language_code
                 }
             except NoTranscriptFound:
                 pass
             
-            # Fall back to auto-generated
-            if not transcript:
-                try:
-                    transcript = transcript_list.find_generated_transcript([language, 'en', 'en-US', 'en-GB'])
-                    transcript_info = {
-                        "transcript_type": "auto-generated",
-                        "language": transcript.language,
-                        "language_code": transcript.language_code
-                    }
-                except NoTranscriptFound:
-                    pass
-            
-            # Try translating to English
+            # Try translating any available transcript to English
             if not transcript:
                 try:
                     for t in transcript_list:
-                        if t.is_translatable:
-                            transcript = t.translate('en')
-                            transcript_info = {
-                                "transcript_type": "translated",
-                                "language": "English",
-                                "language_code": "en"
-                            }
-                            break
-                except Exception:
-                    pass
+                        if t.translation_languages:  # Check if translatable
+                            # Check if English is in translation languages
+                            en_available = any(
+                                lang.get('language_code', '').startswith('en') 
+                                for lang in t.translation_languages
+                            )
+                            if en_available:
+                                transcript = t.translate('en')
+                                transcript_info = {
+                                    "transcript_type": "translated",
+                                    "language": "English",
+                                    "language_code": "en",
+                                    "original_language": t.language
+                                }
+                                break
+                except Exception as e:
+                    log.debug(f"Translation attempt failed: {e}")
             
             if transcript:
                 transcript_data = transcript.fetch()
@@ -676,12 +685,12 @@ class TranscriptFetcher:
                 
                 for entry in transcript_data:
                     entries.append({
-                        "start": entry["start"],
-                        "duration": entry["duration"],
-                        "end": entry["start"] + entry["duration"],
-                        "text": entry["text"]
+                        "start": entry.start,
+                        "duration": entry.duration,
+                        "end": entry.start + entry.duration,
+                        "text": entry.text
                     })
-                    full_text_parts.append(entry["text"])
+                    full_text_parts.append(entry.text)
                 
                 return {
                     "available": True,
@@ -697,6 +706,7 @@ class TranscriptFetcher:
         except VideoUnavailable:
             return {"available": False, "reason": "Video unavailable"}
         except Exception as e:
+            log.debug(f"Transcript fetch error: {type(e).__name__}: {e}")
             return {"available": False, "reason": str(e)}
     
     @staticmethod
