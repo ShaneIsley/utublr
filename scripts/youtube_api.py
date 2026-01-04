@@ -1,18 +1,13 @@
 """
 YouTube API fetcher module.
 Handles all interactions with the YouTube Data API v3 and Transcript API.
-
-Features:
-- Retry with exponential backoff for transient errors
-- Rate limiting between requests
-- Data validation
-- Strictly compatible with youtube-transcript-api v1.x (Object-based)
 """
 
 import os
 import re
 import sys
 import time
+import random  # Added for Jitter
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from functools import wraps
@@ -21,6 +16,13 @@ from typing import Optional, Callable, Any, List
 import requests
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
+# Try to import tqdm for progress bars, fallback to dummy if missing
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
 
 # Logger setup
 try:
@@ -46,7 +48,17 @@ except ImportError:
 
 
 # ============================================================================
-# RETRY LOGIC WITH EXPONENTIAL BACKOFF
+# UTILITIES
+# ============================================================================
+
+def get_progress_bar(iterable, desc="", total=None, unit="it", enable=True):
+    """Returns a tqdm progress bar if available, else returns the iterable."""
+    if TQDM_AVAILABLE and enable:
+        return tqdm(iterable, desc=desc, total=total, unit=unit, leave=False)
+    return iterable
+
+# ============================================================================
+# RETRY LOGIC
 # ============================================================================
 
 RETRYABLE_STATUS_CODES = (429, 500, 502, 503, 504)
@@ -54,114 +66,80 @@ MAX_RETRIES = 3
 BASE_DELAY = 1.0
 MAX_DELAY = 60.0
 
-
-def retry_with_backoff(
-    max_retries: int = MAX_RETRIES,
-    base_delay: float = BASE_DELAY,
-    max_delay: float = MAX_DELAY,
-    exponential_base: float = 2.0,
-):
+def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = BASE_DELAY, max_delay: float = MAX_DELAY, exponential_base: float = 2.0):
     """Decorator for retrying functions with exponential backoff."""
     def decorator(func: Callable):
         @wraps(func)
         def wrapper(*args, **kwargs):
             last_exception = None
-            
             for attempt in range(max_retries + 1):
                 try:
                     return func(*args, **kwargs)
-                    
                 except HttpError as e:
                     status_code = e.resp.status if hasattr(e, 'resp') else None
-                    
                     if status_code in RETRYABLE_STATUS_CODES:
                         last_exception = e
                         if attempt < max_retries:
                             delay = min(base_delay * (exponential_base ** attempt), max_delay)
                             retry_after = e.resp.get('retry-after') if hasattr(e, 'resp') else None
                             if retry_after:
-                                try:
-                                    delay = max(delay, float(retry_after))
-                                except ValueError:
-                                    pass
-                            
-                            log.warning(f"HTTP {status_code} error, retrying in {delay:.1f}s "
-                                       f"(attempt {attempt + 1}/{max_retries + 1}): {e}")
+                                try: delay = max(delay, float(retry_after))
+                                except ValueError: pass
+                            log.warning(f"HTTP {status_code}, retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries + 1})")
                             time.sleep(delay)
                             continue
                     else:
                         log.error(f"Non-retryable HTTP error {status_code}: {e}")
                         raise
-                        
-                except (requests.exceptions.ConnectionError,
-                        requests.exceptions.Timeout,
-                        ConnectionResetError,
-                        TimeoutError) as e:
+                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, ConnectionResetError, TimeoutError) as e:
                     last_exception = e
                     if attempt < max_retries:
                         delay = min(base_delay * (exponential_base ** attempt), max_delay)
-                        log.warning(f"Connection error, retrying in {delay:.1f}s "
-                                   f"(attempt {attempt + 1}/{max_retries + 1}): {e}")
+                        log.warning(f"Connection error, retrying in {delay:.1f}s: {e}")
                         time.sleep(delay)
                         continue
-                    
                 except Exception as e:
                     log.error(f"Non-retryable error in {func.__name__}: {type(e).__name__}: {e}")
                     raise
-            
             log.error(f"All {max_retries + 1} attempts failed for {func.__name__}")
             raise last_exception
-        
         return wrapper
     return decorator
 
 
 # ============================================================================
-# DATA VALIDATION
+# VALIDATORS
 # ============================================================================
 
 def validate_video_data(video: dict) -> dict:
-    """Validate and sanitize video data from API response."""
-    required_fields = ['video_id']
-    for field in required_fields:
-        if not video.get(field):
-            raise ValueError(f"Missing required field: {field}")
-    
+    """Validate and sanitize video data."""
+    if not video.get('video_id'): raise ValueError("Missing video_id")
     stats = video.get('statistics', {})
     for field in ['view_count', 'like_count', 'comment_count']:
         if field in stats:
-            try:
-                stats[field] = int(stats[field])
-            except (ValueError, TypeError):
-                stats[field] = 0
+            try: stats[field] = int(stats[field])
+            except (ValueError, TypeError): stats[field] = 0
     
-    duration = video.get('duration_seconds')
-    if duration is not None:
-        try:
-            video['duration_seconds'] = int(duration)
-        except (ValueError, TypeError):
-            video['duration_seconds'] = None
-    
+    # Duration sanitization
+    if video.get('duration_seconds') is not None:
+        try: video['duration_seconds'] = int(video['duration_seconds'])
+        except (ValueError, TypeError): video['duration_seconds'] = None
     return video
 
-
 def validate_channel_data(channel: dict) -> dict:
-    """Validate and sanitize channel data from API response."""
-    required_fields = ['channel_id']
-    for field in required_fields:
-        if not channel.get(field):
-            raise ValueError(f"Missing required field: {field}")
-    
+    """Validate and sanitize channel data."""
+    if not channel.get('channel_id'): raise ValueError("Missing channel_id")
     stats = channel.get('statistics', {})
     for field in ['subscriber_count', 'view_count', 'video_count']:
         if field in stats:
-            try:
-                stats[field] = int(stats[field])
-            except (ValueError, TypeError):
-                stats[field] = 0
-    
+            try: stats[field] = int(stats[field])
+            except (ValueError, TypeError): stats[field] = 0
     return channel
 
+
+# ============================================================================
+# MAIN CLASS
+# ============================================================================
 
 class YouTubeFetcher:
     """Handles fetching data from YouTube API with rate limiting and retry logic."""
@@ -175,52 +153,46 @@ class YouTubeFetcher:
         self.min_request_interval = 1.0 / requests_per_second
         self.last_request_time = 0
         
+        # Share this rate limit setting with the TranscriptFetcher
+        TranscriptFetcher.set_rate_limit(requests_per_second)
+        
         log.debug(f"YouTubeFetcher initialized, rate limit: {requests_per_second} req/s")
     
     def _rate_limit(self):
-        """Enforce rate limiting between API calls."""
+        """Enforce rate limiting with JITTER (randomness) to avoid fingerprinting."""
         elapsed = time.time() - self.last_request_time
-        if elapsed < self.min_request_interval:
-            sleep_time = self.min_request_interval - elapsed
-            # log.debug(f"Rate limiting: sleeping {sleep_time:.3f}s")
+        target_delay = self.min_request_interval
+        
+        if elapsed < target_delay:
+            # Add 0-20% random jitter to the sleep time
+            jitter = random.uniform(0, 0.2 * target_delay)
+            sleep_time = (target_delay - elapsed) + jitter
             time.sleep(sleep_time)
+            
         self.last_request_time = time.time()
     
     @retry_with_backoff()
     def resolve_channel_id(self, identifier: str) -> str:
         """Resolve various channel identifiers to a channel ID."""
-        log.debug(f"Resolving channel identifier: {identifier}")
         identifier = identifier.strip()
+        if identifier.startswith("UC") and len(identifier) == 24: return identifier
         
-        # Direct channel ID
-        if identifier.startswith("UC") and len(identifier) == 24:
-            return identifier
-        
-        # Handle (@username)
-        if identifier.startswith("@"):
-            handle = identifier.lstrip("@")
-        elif "youtube.com/@" in identifier:
+        if identifier.startswith("@"): handle = identifier.lstrip("@")
+        elif "youtube.com/@" in identifier: 
             match = re.search(r"youtube\.com/@([\w.-]+)", identifier)
             handle = match.group(1) if match else None
         elif "youtube.com/channel/" in identifier:
             match = re.search(r"youtube\.com/channel/(UC[\w-]{22})", identifier)
-            if match:
-                return match.group(1)
+            if match: return match.group(1)
             handle = None
-        else:
-            handle = identifier
+        else: handle = identifier
         
         if handle:
             self._rate_limit()
             try:
-                request = self.youtube.channels().list(
-                    part="id",
-                    forHandle=handle
-                )
+                request = self.youtube.channels().list(part="id", forHandle=handle)
                 response = request.execute()
-                
-                if response.get("items"):
-                    return response["items"][0]["id"]
+                if response.get("items"): return response["items"][0]["id"]
             except Exception as e:
                 log.warning(f"Failed to look up handle: {e}")
         
@@ -228,25 +200,20 @@ class YouTubeFetcher:
     
     @retry_with_backoff()
     def fetch_channel(self, channel_id: str) -> dict:
-        """Fetch comprehensive channel metadata."""
         self._rate_limit()
         request = self.youtube.channels().list(
             part="snippet,contentDetails,statistics,topicDetails,brandingSettings",
             id=channel_id
         )
         response = request.execute()
-        
-        if not response.get("items"):
-            raise ValueError(f"Channel not found: {channel_id}")
+        if not response.get("items"): raise ValueError(f"Channel not found: {channel_id}")
         
         channel = response["items"][0]
         snippet = channel.get("snippet", {})
-        statistics = channel.get("statistics", {})
+        stats = channel.get("statistics", {})
         branding = channel.get("brandingSettings", {})
-        content_details = channel.get("contentDetails", {})
-        
-        thumbnails = snippet.get("thumbnails", {})
-        thumbnail_url = (thumbnails.get("high") or thumbnails.get("default") or {}).get("url")
+        content = channel.get("contentDetails", {})
+        thumbs = snippet.get("thumbnails", {})
         
         result = {
             "channel_id": channel_id,
@@ -255,91 +222,87 @@ class YouTubeFetcher:
             "custom_url": snippet.get("customUrl"),
             "country": snippet.get("country"),
             "published_at": snippet.get("publishedAt"),
-            "thumbnail_url": thumbnail_url,
+            "thumbnail_url": (thumbs.get("high") or thumbs.get("default") or {}).get("url"),
             "banner_url": branding.get("image", {}).get("bannerExternalUrl"),
             "keywords": branding.get("channel", {}).get("keywords"),
             "topic_categories": channel.get("topicDetails", {}).get("topicCategories", []),
-            "uploads_playlist_id": content_details.get("relatedPlaylists", {}).get("uploads"),
+            "uploads_playlist_id": content.get("relatedPlaylists", {}).get("uploads"),
             "statistics": {
-                "subscriber_count": int(statistics.get("subscriberCount", 0)),
-                "view_count": int(statistics.get("viewCount", 0)),
-                "video_count": int(statistics.get("videoCount", 0)),
+                "subscriber_count": int(stats.get("subscriberCount", 0)),
+                "view_count": int(stats.get("viewCount", 0)),
+                "video_count": int(stats.get("videoCount", 0)),
             }
         }
         return validate_channel_data(result)
     
     @retry_with_backoff()
     def _fetch_playlist_page(self, playlist_id: str, page_token: str = None) -> dict:
-        """Fetch a single page of playlist items."""
         self._rate_limit()
-        request = self.youtube.playlistItems().list(
-            part="contentDetails",
-            playlistId=playlist_id,
-            maxResults=50,
-            pageToken=page_token
-        )
-        return request.execute()
+        return self.youtube.playlistItems().list(
+            part="contentDetails", playlistId=playlist_id, maxResults=50, pageToken=page_token
+        ).execute()
     
-    def fetch_playlist_video_ids(self, playlist_id: str, max_results: int = None) -> list[str]:
+    def fetch_playlist_video_ids(self, playlist_id: str, max_results: int = None, use_progress_bar: bool = True) -> list[str]:
         """Fetch all video IDs from a playlist."""
         log.debug(f"Fetching video IDs from playlist: {playlist_id}")
         video_ids = []
-        next_page_token = None
+        next_page = None
         
-        while True:
-            response = self._fetch_playlist_page(playlist_id, next_page_token)
-            
-            for item in response.get("items", []):
-                video_id = item.get("contentDetails", {}).get("videoId")
-                if video_id:
-                    video_ids.append(video_id)
-                    if max_results and len(video_ids) >= max_results:
-                        return video_ids
-            
-            next_page_token = response.get("nextPageToken")
-            if not next_page_token:
-                break
+        # Initial estimation (can't know exactly without extra call, using generic progress)
+        pbar = get_progress_bar(None, desc="Fetching Playlist Pages", unit="page", enable=use_progress_bar)
+        
+        try:
+            while True:
+                response = self._fetch_playlist_page(playlist_id, next_page)
+                
+                for item in response.get("items", []):
+                    vid = item.get("contentDetails", {}).get("videoId")
+                    if vid:
+                        video_ids.append(vid)
+                        if max_results and len(video_ids) >= max_results:
+                            return video_ids
+                
+                if TQDM_AVAILABLE and use_progress_bar: pbar.update(1)
+                
+                next_page = response.get("nextPageToken")
+                if not next_page: break
+        finally:
+             if TQDM_AVAILABLE and use_progress_bar: pbar.close()
         
         return video_ids
     
     @retry_with_backoff()
     def _fetch_videos_batch(self, video_ids: list[str]) -> list[dict]:
-        """Fetch a batch of videos."""
         self._rate_limit()
-        request = self.youtube.videos().list(
+        return self.youtube.videos().list(
             part="snippet,contentDetails,statistics,status,topicDetails",
             id=",".join(video_ids)
-        )
-        return request.execute()
+        ).execute()
     
-    def fetch_videos(self, video_ids: list[str]) -> list[dict]:
-        """Fetch detailed metadata for videos (handles batching)."""
+    def fetch_videos(self, video_ids: list[str], use_progress_bar: bool = True) -> list[dict]:
+        """Fetch detailed metadata for videos with progress bar."""
         all_videos = []
+        batches = [video_ids[i:i + 50] for i in range(0, len(video_ids), 50)]
         
-        for i in range(0, len(video_ids), 50):
-            batch = video_ids[i:i + 50]
+        pbar = get_progress_bar(batches, desc="Fetching Video Metadata", unit="batch", enable=use_progress_bar)
+        
+        for batch in pbar:
             response = self._fetch_videos_batch(batch)
-            
             for item in response.get("items", []):
-                video = self._parse_video(item)
-                all_videos.append(validate_video_data(video))
-        
+                all_videos.append(validate_video_data(self._parse_video(item)))
+                
         return all_videos
     
     def _parse_video(self, item: dict) -> dict:
-        """Parse video API response into our schema."""
         snippet = item.get("snippet", {})
-        statistics = item.get("statistics", {})
-        content_details = item.get("contentDetails", {})
+        stats = item.get("statistics", {})
+        details = item.get("contentDetails", {})
         status = item.get("status", {})
+        thumbs = snippet.get("thumbnails", {})
         
-        thumbnails = snippet.get("thumbnails", {})
-        thumbnail_url = (thumbnails.get("high") or thumbnails.get("default") or {}).get("url")
-        
-        duration_iso = content_details.get("duration", "")
-        duration_seconds = self._parse_duration(duration_iso)
-        
-        chapters = self._parse_chapters(snippet.get("description", ""), duration_seconds)
+        duration_iso = details.get("duration", "")
+        duration_sec = self._parse_duration(duration_iso)
+        chapters = self._parse_chapters(snippet.get("description", ""), duration_sec)
         
         return {
             "video_id": item["id"],
@@ -347,204 +310,168 @@ class YouTubeFetcher:
             "title": snippet.get("title"),
             "description": snippet.get("description"),
             "published_at": snippet.get("publishedAt"),
-            "duration_seconds": duration_seconds,
+            "duration_seconds": duration_sec,
             "duration_iso": duration_iso,
             "category_id": snippet.get("categoryId"),
             "default_language": snippet.get("defaultLanguage"),
             "default_audio_language": snippet.get("defaultAudioLanguage"),
             "tags": snippet.get("tags", []),
-            "thumbnail_url": thumbnail_url,
-            "caption_available": content_details.get("caption") == "true",
+            "thumbnail_url": (thumbs.get("high") or thumbs.get("default") or {}).get("url"),
+            "caption_available": details.get("caption") == "true",
             "privacy_status": status.get("privacyStatus"),
             "made_for_kids": status.get("madeForKids"),
             "topic_categories": item.get("topicDetails", {}).get("topicCategories", []),
             "has_chapters": len(chapters) > 0,
             "chapters": chapters,
             "statistics": {
-                "view_count": int(statistics.get("viewCount", 0)),
-                "like_count": int(statistics.get("likeCount", 0)),
-                "comment_count": int(statistics.get("commentCount", 0)),
+                "view_count": int(stats.get("viewCount", 0)),
+                "like_count": int(stats.get("likeCount", 0)),
+                "comment_count": int(stats.get("commentCount", 0)),
             }
         }
     
     def _parse_duration(self, duration: str) -> Optional[int]:
-        """Convert ISO 8601 duration (PT1H2M3S) to seconds."""
-        if not duration:
-            return None
+        if not duration: return None
         match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration)
-        if not match:
-            return None
-        hours = int(match.group(1) or 0)
-        minutes = int(match.group(2) or 0)
-        seconds = int(match.group(3) or 0)
-        return hours * 3600 + minutes * 60 + seconds
+        if not match: return None
+        h, m, s = int(match.group(1) or 0), int(match.group(2) or 0), int(match.group(3) or 0)
+        return h * 3600 + m * 60 + s
     
     def _parse_chapters(self, description: str, duration_seconds: Optional[int] = None) -> list[dict]:
-        """Extract chapter timestamps from video description."""
-        if not description:
-            return []
-        
+        if not description: return []
         chapters = []
-        timestamp_pattern = r'^[\s•\-\*]*(\d{1,2}:)?(\d{1,2}):(\d{2})[\s\-:]+(.+?)$'
-        
+        pattern = r'^[\s•\-\*]*(\d{1,2}:)?(\d{1,2}):(\d{2})[\s\-:]+(.+?)$'
         for line in description.split('\n'):
-            match = re.match(timestamp_pattern, line.strip())
+            match = re.match(pattern, line.strip())
             if match:
-                hours = int(match.group(1).rstrip(':')) if match.group(1) else 0
-                minutes = int(match.group(2))
-                seconds = int(match.group(3))
-                title = match.group(4).strip()
-                
-                start_seconds = hours * 3600 + minutes * 60 + seconds
-                chapters.append({
-                    "title": title,
-                    "start_seconds": start_seconds,
-                })
+                h = int(match.group(1).rstrip(':')) if match.group(1) else 0
+                m, s, title = int(match.group(2)), int(match.group(3)), match.group(4).strip()
+                chapters.append({"title": title, "start_seconds": h * 3600 + m * 60 + s})
         
-        for i, chapter in enumerate(chapters):
-            if i < len(chapters) - 1:
-                chapter["end_seconds"] = chapters[i + 1]["start_seconds"]
-            elif duration_seconds:
-                chapter["end_seconds"] = duration_seconds
-        
+        for i, ch in enumerate(chapters):
+            if i < len(chapters) - 1: ch["end_seconds"] = chapters[i + 1]["start_seconds"]
+            elif duration_seconds: ch["end_seconds"] = duration_seconds
         return chapters
     
     @retry_with_backoff()
     def _fetch_comments_page(self, video_id: str, max_results: int, page_token: str = None) -> dict:
-        """Fetch a single page of comments."""
         self._rate_limit()
-        request = self.youtube.commentThreads().list(
-            part="snippet,replies",
-            videoId=video_id,
-            maxResults=min(100, max_results),
-            pageToken=page_token,
-            order="time",
-            textFormat="plainText"
-        )
-        return request.execute()
+        return self.youtube.commentThreads().list(
+            part="snippet,replies", videoId=video_id, maxResults=min(100, max_results),
+            pageToken=page_token
+        ).execute()
     
-    def fetch_comments(
-        self, 
-        video_id: str, 
-        since: datetime = None, 
-        max_results: int = 500,
-        max_replies_per_comment: int = 10
-    ) -> list[dict]:
-        """Fetch comments for a video."""
+    def fetch_comments(self, video_id: str, since: datetime = None, max_results: int = 500, max_replies_per_comment: int = 10, use_progress_bar: bool = False) -> list[dict]:
+        """Fetch comments for a video with optional progress bar."""
         comments = []
-        next_page_token = None
+        next_page = None
+        
+        # We don't know total comments upfront efficiently, so we use a counter bar
+        pbar = get_progress_bar(None, desc=f"Comments {video_id}", unit="cmts", enable=use_progress_bar)
         
         try:
             while len(comments) < max_results:
-                response = self._fetch_comments_page(video_id, max_results - len(comments), next_page_token)
+                response = self._fetch_comments_page(video_id, max_results - len(comments), next_page)
                 
+                fetched_in_batch = 0
                 found_old = False
+                
                 for item in response.get("items", []):
-                    top_comment = item["snippet"]["topLevelComment"]["snippet"]
-                    published_at = top_comment.get("publishedAt")
+                    top = item["snippet"]["topLevelComment"]["snippet"]
+                    pub_at = top.get("publishedAt")
                     
-                    if since and published_at:
-                        comment_time = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
-                        if since.tzinfo is None:
-                            since = since.replace(tzinfo=comment_time.tzinfo)
-                        if comment_time <= since:
+                    if since and pub_at:
+                        c_time = datetime.fromisoformat(pub_at.replace("Z", "+00:00"))
+                        if since.tzinfo is None: since = since.replace(tzinfo=c_time.tzinfo)
+                        if c_time <= since:
                             found_old = True
                             break
                     
                     comments.append({
-                        "comment_id": item["id"],
-                        "video_id": video_id,
-                        "parent_comment_id": None,
-                        "text": top_comment.get("textDisplay"),
-                        "like_count": top_comment.get("likeCount", 0),
-                        "published_at": published_at,
+                        "comment_id": item["id"], "video_id": video_id, "parent_comment_id": None,
+                        "text": top.get("textDisplay"), "like_count": top.get("likeCount", 0), "published_at": pub_at
                     })
+                    fetched_in_batch += 1
                     
                     if "replies" in item:
                         replies = item["replies"]["comments"][:max_replies_per_comment]
-                        for reply in replies:
-                            reply_snippet = reply["snippet"]
+                        for r in replies:
+                            rs = r["snippet"]
                             comments.append({
-                                "comment_id": reply["id"],
-                                "video_id": video_id,
-                                "parent_comment_id": item["id"],
-                                "text": reply_snippet.get("textDisplay"),
-                                "like_count": reply_snippet.get("likeCount", 0),
-                                "published_at": reply_snippet.get("publishedAt"),
+                                "comment_id": r["id"], "video_id": video_id, "parent_comment_id": item["id"],
+                                "text": rs.get("textDisplay"), "like_count": rs.get("likeCount", 0), "published_at": rs.get("publishedAt")
                             })
+                            fetched_in_batch += 1
                 
-                if found_old:
-                    break
+                if TQDM_AVAILABLE and use_progress_bar: pbar.update(fetched_in_batch)
                 
-                next_page_token = response.get("nextPageToken")
-                if not next_page_token:
-                    break
-                    
+                if found_old: break
+                next_page = response.get("nextPageToken")
+                if not next_page: break
+                
         except HttpError as e:
-            if e.resp.status == 403:
-                return []
+            if e.resp.status == 403: return [] # Comments disabled
             raise
+        finally:
+            if TQDM_AVAILABLE and use_progress_bar: pbar.close()
         
         return comments
     
     @retry_with_backoff()
     def _fetch_playlists_page(self, channel_id: str, page_token: str = None) -> dict:
-        """Fetch a single page of playlists."""
         self._rate_limit()
-        request = self.youtube.playlists().list(
-            part="snippet,contentDetails,status",
-            channelId=channel_id,
-            maxResults=50,
-            pageToken=page_token
-        )
-        return request.execute()
+        return self.youtube.playlists().list(
+            part="snippet,contentDetails,status", channelId=channel_id, maxResults=50, pageToken=page_token
+        ).execute()
     
     def fetch_playlists(self, channel_id: str) -> list[dict]:
-        """Fetch all playlists for a channel."""
         playlists = []
-        next_page_token = None
-        
+        next_page = None
         while True:
-            response = self._fetch_playlists_page(channel_id, next_page_token)
-            
+            response = self._fetch_playlists_page(channel_id, next_page)
             for item in response.get("items", []):
                 snippet = item.get("snippet", {})
-                thumbnails = snippet.get("thumbnails", {})
-                thumbnail_url = (thumbnails.get("high") or thumbnails.get("default") or {}).get("url")
-                
+                thumbs = snippet.get("thumbnails", {})
                 playlists.append({
                     "playlist_id": item["id"],
                     "channel_id": channel_id,
                     "title": snippet.get("title"),
                     "description": snippet.get("description"),
                     "published_at": snippet.get("publishedAt"),
-                    "thumbnail_url": thumbnail_url,
+                    "thumbnail_url": (thumbs.get("high") or thumbs.get("default") or {}).get("url"),
                     "item_count": item.get("contentDetails", {}).get("itemCount", 0),
                 })
-            
-            next_page_token = response.get("nextPageToken")
-            if not next_page_token:
-                break
-        
+            next_page = response.get("nextPageToken")
+            if not next_page: break
         return playlists
 
 
 class TranscriptFetcher:
-    """Handles fetching video transcripts using youtube-transcript-api v1.x (Objects)."""
+    """Handles fetching video transcripts with Rate Limiting."""
     
-    _api_instance = None
+    # Class-level rate limiting to share across instances/calls
+    min_request_interval = 0.5 # Default
+    last_request_time = 0
     
     @classmethod
-    def _get_api(cls):
-        """Get or create the YouTubeTranscriptApi instance."""
-        if cls._api_instance is None and TRANSCRIPT_API_AVAILABLE:
-            cls._api_instance = YouTubeTranscriptApi()
-        return cls._api_instance
-    
+    def set_rate_limit(cls, requests_per_second: float):
+        cls.min_request_interval = 1.0 / requests_per_second
+
+    @classmethod
+    def _rate_limit(cls):
+        """Enforce rate limiting with Jitter."""
+        elapsed = time.time() - cls.last_request_time
+        if elapsed < cls.min_request_interval:
+            # Jitter: 0 to 20% extra
+            jitter = random.uniform(0, 0.2 * cls.min_request_interval)
+            time.sleep((cls.min_request_interval - elapsed) + jitter)
+        cls.last_request_time = time.time()
+
     @staticmethod
     def fetch(video_id: str, language: str = "en") -> Optional[dict]:
         """Fetch transcript using v1.x API objects."""
-        log.debug(f"Fetching transcript for video {video_id}")
+        # Enforce rate limit before ANY fetch attempt
+        TranscriptFetcher._rate_limit()
         
         if TRANSCRIPT_API_AVAILABLE:
             result = TranscriptFetcher._fetch_with_api(video_id, language)
@@ -555,178 +482,78 @@ class TranscriptFetcher:
     
     @staticmethod
     def _fetch_with_api(video_id: str, language: str = "en") -> Optional[dict]:
-        """Fetch transcript using youtube-transcript-api v1.x (Object-based)."""
         try:
-            api = TranscriptFetcher._get_api()
-            if api is None:
-                return {"available": False, "reason": "Transcript API not available"}
-            
-            # v1.x: Use .list() which returns a TranscriptList object
+            api = YouTubeTranscriptApi() # Fresh instance per request
             transcript_list = api.list(video_id)
             
             transcript = None
             transcript_info = {}
             
-            # 1. Try Manual English
-            # v1.x: returns Transcript objects. We access attributes directly.
+            # 1. Manual
             try:
                 for t in transcript_list:
                     if not t.is_generated and t.language_code in [language, 'en', 'en-US', 'en-GB']:
                         transcript = t
-                        transcript_info = {
-                            "transcript_type": "manual",
-                            "language": t.language,
-                            "language_code": t.language_code
-                        }
+                        transcript_info = {"transcript_type": "manual", "language": t.language, "language_code": t.language_code}
                         break
-            except Exception:
-                pass
+            except Exception: pass
             
-            # 2. Try Auto-generated English
+            # 2. Auto
             if not transcript:
                 try:
-                    # v1.x has helper methods on the list object if available, but manual iteration is safest
-                    # if .find_transcript exists on the list object, we can use it.
-                    # Based on docs: transcript_list.find_transcript(['en']) returns a Transcript object
                     transcript = transcript_list.find_transcript([language, 'en', 'en-US', 'en-GB'])
-                    transcript_info = {
-                        "transcript_type": "auto-generated" if transcript.is_generated else "manual",
-                        "language": transcript.language,
-                        "language_code": transcript.language_code
-                    }
-                except NoTranscriptFound:
-                    pass
+                    transcript_info = {"transcript_type": "auto", "language": transcript.language, "language_code": transcript.language_code}
+                except NoTranscriptFound: pass
             
-            # 3. Try Translation
+            # 3. Translate
             if not transcript:
                 try:
                     for t in transcript_list:
                         if t.is_translatable:
-                            # t.translation_languages is a list of dict-like objects in v1.x
-                            # We check if target is available
-                            en_available = False
+                            en_avail = False
                             for lang in t.translation_languages:
-                                # In v1.x, translation_languages entries are typically dicts {'language':..., 'language_code':...}
-                                # or objects. We handle the dict case which is standard for the metadata.
                                 code = lang.get('language_code') if isinstance(lang, dict) else getattr(lang, 'language_code', '')
-                                if code and code.startswith('en'):
-                                    en_available = True
-                                    break
-                            
-                            if en_available:
+                                if code.startswith('en'): en_avail = True; break
+                            if en_avail:
                                 transcript = t.translate('en')
-                                transcript_info = {
-                                    "transcript_type": "translated",
-                                    "language": "English",
-                                    "language_code": "en",
-                                    "original_language": t.language
-                                }
+                                transcript_info = {"transcript_type": "translated", "language": "en", "original": t.language}
                                 break
-                except Exception:
-                    pass
+                except Exception: pass
             
             if transcript:
-                # v1.x: .fetch() returns a list of FetchedTranscriptSnippet objects
-                data_objects = transcript.fetch()
-                entries = []
-                full_text_parts = []
-                
-                for snippet in data_objects:
-                    # v1.x: Access attributes directly
-                    text = snippet.text
-                    start = snippet.start
-                    duration = snippet.duration
-                    
-                    entries.append({
-                        "start": start,
-                        "duration": duration,
-                        "end": start + duration,
-                        "text": text
-                    })
-                    full_text_parts.append(text)
-                
-                return {
-                    "available": True,
-                    **transcript_info,
-                    "entries": entries,
-                    "full_text": " ".join(full_text_parts)
-                }
+                data = transcript.fetch()
+                entries = [{"start": s.start, "duration": s.duration, "end": s.start+s.duration, "text": s.text} for s in data]
+                return {"available": True, **transcript_info, "entries": entries, "full_text": " ".join(e["text"] for e in entries)}
             
             return {"available": False, "reason": "No English transcript found"}
             
-        except TranscriptsDisabled:
-            return {"available": False, "reason": "Transcripts disabled"}
-        except VideoUnavailable:
-            return {"available": False, "reason": "Video unavailable"}
-        except Exception as e:
-            return {"available": False, "reason": str(e)}
+        except TranscriptsDisabled: return {"available": False, "reason": "Transcripts disabled"}
+        except VideoUnavailable: return {"available": False, "reason": "Video unavailable"}
+        except Exception as e: return {"available": False, "reason": str(e)}
     
     @staticmethod
     def _fetch_fallback(video_id: str) -> Optional[dict]:
-        """Fallback method (HTML scraping) if API fails."""
         try:
-            watch_url = f"https://www.youtube.com/watch?v={video_id}"
-            response = requests.get(watch_url, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }, timeout=10)
+            url = f"https://www.youtube.com/watch?v={video_id}"
+            resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            if resp.status_code != 200: return {"available": False, "reason": "Page fetch failed"}
             
-            if response.status_code != 200:
-                return {"available": False, "reason": "Could not fetch video page"}
+            match = re.search(r'"captions":.*?"captionTracks":\[(.*?)\]', resp.text)
+            if not match: return {"available": False, "reason": "No captions found"}
             
-            caption_pattern = r'"captions":.*?"captionTracks":\[(.*?)\]'
-            match = re.search(caption_pattern, response.text)
+            tracks = match.group(1)
+            en_match = re.search(r'"baseUrl":"([^"]+)"[^}]*"languageCode":"(en[^"]*)"', tracks)
+            cap_url = (en_match.group(1) if en_match else re.search(r'"baseUrl":"([^"]+)"', tracks).group(1)).replace("\\u0026", "&")
             
-            if not match:
-                return {"available": False, "reason": "No captions found"}
-            
-            caption_tracks = match.group(1)
-            
-            # Find English caption track
-            en_pattern = r'"baseUrl":"([^"]+)"[^}]*"languageCode":"(en[^"]*)"'
-            en_match = re.search(en_pattern, caption_tracks)
-            
-            if not en_match:
-                any_pattern = r'"baseUrl":"([^"]+)"'
-                any_match = re.search(any_pattern, caption_tracks)
-                if not any_match:
-                    return {"available": False, "reason": "No English captions found"}
-                caption_url = any_match.group(1).replace("\\u0026", "&")
-            else:
-                caption_url = en_match.group(1).replace("\\u0026", "&")
-            
-            caption_response = requests.get(caption_url, timeout=10)
-            if caption_response.status_code != 200:
-                return {"available": False, "reason": "Could not fetch captions"}
-            
-            root = ET.fromstring(caption_response.text)
+            cap_resp = requests.get(cap_url, timeout=10)
+            root = ET.fromstring(cap_resp.text)
             
             entries = []
-            full_text_parts = []
-            
-            for text_elem in root.findall(".//text"):
-                start = float(text_elem.get("start", 0))
-                duration = float(text_elem.get("dur", 0))
-                text = text_elem.text or ""
-                # Decode basic HTML entities manually
-                text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-                text = text.replace("&#39;", "'").replace("&quot;", '"')
+            for t in root.findall(".//text"):
+                start = float(t.get("start", 0))
+                dur = float(t.get("dur", 0))
+                text = (t.text or "").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&#39;", "'").replace("&quot;", '"')
+                entries.append({"start": start, "duration": dur, "end": start+dur, "text": text})
                 
-                entries.append({
-                    "start": start,
-                    "duration": duration,
-                    "end": start + duration,
-                    "text": text
-                })
-                full_text_parts.append(text)
-            
-            return {
-                "available": True,
-                "transcript_type": "fetched_fallback",
-                "language": "English",
-                "language_code": "en",
-                "entries": entries,
-                "full_text": " ".join(full_text_parts)
-            }
-            
-        except Exception as e:
-            return {"available": False, "reason": str(e)}
+            return {"available": True, "transcript_type": "fallback", "language": "en", "entries": entries, "full_text": " ".join(e["text"] for e in entries)}
+        except Exception as e: return {"available": False, "reason": str(e)}
