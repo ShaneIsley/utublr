@@ -83,7 +83,7 @@ def fetch_channel_data(
     quota: QuotaTracker,
     channel_identifier: str,
     fetch_comments: bool = True,
-    fetch_transcripts: bool = True,
+    fetch_transcripts: bool = False,
     max_videos: int = None,
     max_video_age_days: int = None,
     max_comments_per_video: int = 500,
