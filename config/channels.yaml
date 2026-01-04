@@ -40,6 +40,9 @@ channels:
 settings:
   # Rate limiting: requests per second to YouTube API
   requests_per_second: 2.0
+
+  # Transcripts probably blocked from github
+  fetch_transcripts: false
   
   # Default max comments per video
   max_comments_per_video: 500
