@@ -17,9 +17,9 @@
 channels:
   # Simple format - just the identifier
   - "@samwitteveenai"
+  - "@aipapersacademy"
   - "@trychroma"
   - "@bulwarkmedia"
-  - "@aipapersacademy"
   - "@mojo_monday_gpu"
   - "@podsaveamerica"
   - "@GithubAwesome"
@@ -29,7 +29,6 @@ channels:
   #   max_videos: 500           # Only most recent 500 videos
   #   max_video_age_days: 365   # Only videos from last year
   #   fetch_comments: true
-  #   fetch_transcripts: true
   #   comments_update_hours: 24      # Re-check comments every 24h for older videos
   #   comments_update_hours_new: 4   # Re-check every 4h for new videos
   #   new_video_days: 7              # Videos < 7 days old are "new"
@@ -44,9 +43,6 @@ channels:
 settings:
   # Rate limiting: requests per second to YouTube API
   requests_per_second: 2.0
-
-  # Transcripts probably blocked from github
-  fetch_transcripts: false
   
   # Default max comments per video
   max_comments_per_video: 500
