@@ -3,6 +3,8 @@ YouTube API quota tracking and management.
 
 YouTube Data API v3 has a daily quota of 10,000 units (default).
 This module tracks usage and prevents exceeding limits.
+
+Quota state is persisted to the database to track usage across runs.
 """
 
 import json
@@ -24,7 +26,7 @@ class QuotaTracker:
     """
     Track YouTube API quota usage across runs.
     
-    Persists quota usage to file so we can track across multiple runs in a day.
+    Persists quota usage to database so we can track across multiple runs in a day.
     """
     
     # API operation costs (units)
@@ -43,7 +45,7 @@ class QuotaTracker:
     def __init__(
         self, 
         daily_limit: int = None,
-        state_file: str = "data/quota_state.json",
+        conn = None,
         warn_threshold: float = 0.8,  # Warn at 80% usage
         abort_threshold: float = 0.95  # Abort at 95% usage
     ):
@@ -52,12 +54,12 @@ class QuotaTracker:
         
         Args:
             daily_limit: Daily quota limit (default: YOUTUBE_QUOTA_LIMIT env or 10000)
-            state_file: File to persist quota state across runs
+            conn: Database connection for persistence (required for cross-run tracking)
             warn_threshold: Fraction of quota at which to warn
             abort_threshold: Fraction of quota at which to abort
         """
         self.daily_limit = daily_limit or int(os.environ.get("YOUTUBE_QUOTA_LIMIT", 10000))
-        self.state_file = state_file
+        self.conn = conn
         self.warn_threshold = warn_threshold
         self.abort_threshold = abort_threshold
         
@@ -70,38 +72,38 @@ class QuotaTracker:
         self._load_state()
         
         log.info(f"Quota tracker initialized: limit={self.daily_limit}, used_today={self.used}")
-        log.debug(f"State file: {self.state_file}")
+        if self.used > 0:
+            log.info(f"Resumed from previous runs: {self.used} units already used today")
         log.debug(f"Thresholds: warn={self.warn_threshold}, abort={self.abort_threshold}")
     
     def _load_state(self):
-        """Load persisted quota state from file."""
+        """Load persisted quota state from database."""
+        if not self.conn:
+            log.debug("No database connection, quota state won't persist")
+            return
+            
         try:
-            if os.path.exists(self.state_file):
-                with open(self.state_file, 'r') as f:
-                    state = json.load(f)
-                
-                # Only use state if it's from today
-                if state.get('date') == self.today:
-                    self.used = state.get('used', 0)
-                    self.operations = state.get('operations', {})
-                    log.debug(f"Loaded quota state: {self.used} used today")
-                else:
-                    log.debug(f"State file is from {state.get('date')}, starting fresh")
+            from database import get_quota_usage
+            state = get_quota_usage(self.conn, self.today)
+            
+            if state:
+                self.used = state.get('used', 0)
+                self.operations = state.get('operations', {})
+                log.debug(f"Loaded quota state from database: {self.used} used today")
+            else:
+                log.debug(f"No quota state for {self.today}, starting fresh")
         except Exception as e:
             log.warning(f"Could not load quota state: {e}")
     
     def _save_state(self):
-        """Persist quota state to file."""
+        """Persist quota state to database."""
+        if not self.conn:
+            return
+            
         try:
-            os.makedirs(os.path.dirname(self.state_file) or '.', exist_ok=True)
-            with open(self.state_file, 'w') as f:
-                json.dump({
-                    'date': self.today,
-                    'used': self.used,
-                    'operations': self.operations,
-                    'last_updated': datetime.now().isoformat()
-                }, f, indent=2)
-            log.debug(f"Saved quota state: {self.used} used")
+            from database import save_quota_usage
+            save_quota_usage(self.conn, self.today, self.used, self.operations)
+            log.debug(f"Saved quota state to database: {self.used} used")
         except Exception as e:
             log.warning(f"Could not save quota state: {e}")
     
