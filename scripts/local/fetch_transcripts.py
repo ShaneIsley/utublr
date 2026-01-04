@@ -39,7 +39,6 @@ Environment Variables:
 """
 
 import argparse
-import json
 import os
 import sys
 import time
@@ -50,16 +49,241 @@ from typing import Optional
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from logger import get_logger
-from database import get_connection, init_database, get_videos_without_transcripts, insert_transcript
-from youtube_api import TranscriptFetcher, TRANSCRIPT_API_AVAILABLE
+from database import get_connection, init_database, insert_transcript
 
 log = get_logger("fetch_transcripts")
+
+# ============================================================================
+# TRANSCRIPT API SETUP
+# ============================================================================
+
+try:
+    from youtube_transcript_api import YouTubeTranscriptApi
+    from youtube_transcript_api._errors import (
+        NoTranscriptFound,
+        NoTranscriptAvailable,
+        TranscriptsDisabled,
+        VideoUnavailable,
+    )
+    TRANSCRIPT_API_AVAILABLE = True
+    log.debug("youtube-transcript-api loaded successfully")
+except ImportError:
+    TRANSCRIPT_API_AVAILABLE = False
+    log.error("youtube-transcript-api not installed! Install with: pip install youtube-transcript-api")
 
 # Default rate limiting
 DEFAULT_DELAY = 1.0  # seconds between requests
 MAX_RETRIES = 3
 RETRY_DELAY = 5.0  # seconds before retry
 
+# Singleton API instance
+_api_instance = None
+
+
+def get_transcript_api():
+    """Get or create the YouTubeTranscriptApi instance."""
+    global _api_instance
+    if _api_instance is None and TRANSCRIPT_API_AVAILABLE:
+        _api_instance = YouTubeTranscriptApi()
+    return _api_instance
+
+
+# ============================================================================
+# TRANSCRIPT FETCHING
+# ============================================================================
+
+def fetch_transcript(video_id: str, languages: list = None) -> dict:
+    """
+    Fetch transcript for a video using youtube-transcript-api v1.x.
+    
+    Priority:
+    1. Manually created transcript in requested languages
+    2. Auto-generated transcript in requested languages  
+    3. Any transcript translated to English
+    
+    Args:
+        video_id: YouTube video ID
+        languages: List of language codes in priority order (default: ['en', 'en-US', 'en-GB'])
+    
+    Returns:
+        Dict with transcript data or availability status
+    """
+    if languages is None:
+        languages = ['en', 'en-US', 'en-GB']
+    
+    if not TRANSCRIPT_API_AVAILABLE:
+        return {"available": False, "reason": "youtube-transcript-api not installed"}
+    
+    try:
+        api = get_transcript_api()
+        if api is None:
+            return {"available": False, "reason": "Transcript API not available"}
+        
+        # Get list of available transcripts
+        transcript_list = api.list(video_id)
+        
+        transcript = None
+        transcript_info = {}
+        
+        # Strategy 1: Try to find manually created transcript in preferred languages
+        try:
+            transcript = transcript_list.find_manually_created_transcript(languages)
+            transcript_info = {
+                "transcript_type": "manual",
+                "language": transcript.language,
+                "language_code": transcript.language_code,
+                "is_generated": False,
+            }
+            log.debug(f"Found manual transcript: {transcript.language}")
+        except NoTranscriptFound:
+            log.debug("No manual transcript in preferred languages")
+        
+        # Strategy 2: Try auto-generated transcript
+        if not transcript:
+            try:
+                transcript = transcript_list.find_generated_transcript(languages)
+                transcript_info = {
+                    "transcript_type": "auto-generated",
+                    "language": transcript.language,
+                    "language_code": transcript.language_code,
+                    "is_generated": True,
+                }
+                log.debug(f"Found auto-generated transcript: {transcript.language}")
+            except NoTranscriptFound:
+                log.debug("No auto-generated transcript in preferred languages")
+        
+        # Strategy 3: Translate any available transcript to English
+        if not transcript:
+            for t in transcript_list:
+                if t.is_translatable:
+                    try:
+                        transcript = t.translate('en')
+                        transcript_info = {
+                            "transcript_type": "translated",
+                            "language": "English (translated)",
+                            "language_code": "en",
+                            "is_generated": t.is_generated,
+                            "original_language": t.language,
+                            "original_language_code": t.language_code,
+                        }
+                        log.debug(f"Translating from {t.language} to English")
+                        break
+                    except Exception as e:
+                        log.debug(f"Translation failed for {t.language}: {e}")
+                        continue
+        
+        if not transcript:
+            return {"available": False, "reason": "No transcript in supported languages"}
+        
+        # Fetch the actual transcript content
+        fetched = transcript.fetch()
+        
+        # Convert to raw data format (list of dicts)
+        raw_data = fetched.to_raw_data()
+        
+        # Build entries with computed end times
+        entries = []
+        full_text_parts = []
+        
+        for entry in raw_data:
+            entries.append({
+                "start": entry["start"],
+                "duration": entry["duration"],
+                "end": entry["start"] + entry["duration"],
+                "text": entry["text"]
+            })
+            full_text_parts.append(entry["text"])
+        
+        return {
+            "available": True,
+            **transcript_info,
+            "entries": entries,
+            "full_text": " ".join(full_text_parts),
+            "snippet_count": len(entries),
+        }
+        
+    except TranscriptsDisabled:
+        return {"available": False, "reason": "Transcripts disabled by uploader"}
+    except VideoUnavailable:
+        return {"available": False, "reason": "Video unavailable"}
+    except NoTranscriptAvailable:
+        return {"available": False, "reason": "No transcripts available"}
+    except Exception as e:
+        error_msg = str(e)
+        # Check for IP blocking
+        if any(x in error_msg.lower() for x in ['blocked', 'ip', '429', 'too many']):
+            log.warning(f"Possible IP block for {video_id}: {e}")
+            return {"available": False, "reason": f"Request blocked: {error_msg}"}
+        log.debug(f"Transcript fetch error for {video_id}: {type(e).__name__}: {e}")
+        return {"available": False, "reason": str(e)}
+
+
+def fetch_transcript_with_retry(
+    video_id: str, 
+    max_retries: int = MAX_RETRIES,
+    retry_delay: float = RETRY_DELAY
+) -> dict:
+    """
+    Fetch transcript with retry logic.
+    
+    Returns dict with:
+        - success: bool
+        - transcript: dict (if success)
+        - error_type: str (if failure)
+        - reason: str
+    """
+    last_error = None
+    
+    for attempt in range(max_retries + 1):
+        try:
+            transcript = fetch_transcript(video_id)
+            
+            if transcript and transcript.get("available"):
+                return {
+                    "success": True,
+                    "transcript": transcript,
+                    "error_type": None,
+                    "reason": f"{transcript.get('transcript_type', 'unknown')} ({transcript.get('language_code', '?')})"
+                }
+            else:
+                # Not available but not an error - don't retry
+                reason = transcript.get("reason", "Unknown") if transcript else "Fetch returned None"
+                error_type = "disabled" if "disabled" in reason.lower() else "unavailable"
+                return {
+                    "success": False,
+                    "transcript": None,
+                    "error_type": error_type,
+                    "reason": reason
+                }
+                
+        except Exception as e:
+            last_error = e
+            error_str = str(e)
+            
+            # Check if retryable
+            retryable = any(x in error_str.lower() for x in [
+                "timeout", "connection", "429", "rate limit", "too many"
+            ])
+            
+            if retryable and attempt < max_retries:
+                delay = retry_delay * (2 ** attempt)  # Exponential backoff
+                log.warning(f"Retry {attempt + 1}/{max_retries} for {video_id} after {delay:.1f}s: {e}")
+                time.sleep(delay)
+                continue
+            else:
+                break
+    
+    return {
+        "success": False,
+        "transcript": None,
+        "error_type": "error",
+        "reason": str(last_error) if last_error else "Unknown error"
+    }
+
+
+# ============================================================================
+# DATABASE HELPERS
+# ============================================================================
 
 def get_videos_needing_transcripts(conn, channel_id: str = None, limit: int = None) -> list:
     """
@@ -114,8 +338,7 @@ def resolve_channel_id(conn, identifier: str) -> Optional[str]:
     if result:
         return result[0]
     
-    # Try handle lookup (stored in title or custom_url typically)
-    # This is a simplified check - the full resolver is in youtube_api.py
+    # Try handle lookup (stored in custom_url typically)
     handle = identifier.lstrip("@")
     result = conn.execute(
         "SELECT channel_id FROM channels WHERE custom_url LIKE ? OR title LIKE ?",
@@ -127,68 +350,9 @@ def resolve_channel_id(conn, identifier: str) -> Optional[str]:
     return None
 
 
-def fetch_transcript_with_retry(
-    video_id: str, 
-    max_retries: int = MAX_RETRIES,
-    retry_delay: float = RETRY_DELAY
-) -> dict:
-    """
-    Fetch transcript with retry logic.
-    
-    Returns dict with:
-        - success: bool
-        - transcript: dict (if success)
-        - error_type: str (if failure)
-        - reason: str
-    """
-    last_error = None
-    
-    for attempt in range(max_retries + 1):
-        try:
-            transcript = TranscriptFetcher.fetch(video_id)
-            
-            if transcript and transcript.get("available"):
-                return {
-                    "success": True,
-                    "transcript": transcript,
-                    "error_type": None,
-                    "reason": f"{transcript.get('transcript_type', 'unknown')} ({transcript.get('language_code', '?')})"
-                }
-            else:
-                # Not available but not an error - don't retry
-                reason = transcript.get("reason", "Unknown") if transcript else "Fetch returned None"
-                error_type = "disabled" if "disabled" in reason.lower() else "unavailable"
-                return {
-                    "success": False,
-                    "transcript": None,
-                    "error_type": error_type,
-                    "reason": reason
-                }
-                
-        except Exception as e:
-            last_error = e
-            error_str = str(e)
-            
-            # Check if retryable
-            retryable = any(x in error_str.lower() for x in [
-                "timeout", "connection", "429", "rate limit", "too many"
-            ])
-            
-            if retryable and attempt < max_retries:
-                delay = retry_delay * (2 ** attempt)  # Exponential backoff
-                log.warning(f"Retry {attempt + 1}/{max_retries} for {video_id} after {delay:.1f}s: {e}")
-                time.sleep(delay)
-                continue
-            else:
-                break
-    
-    return {
-        "success": False,
-        "transcript": None,
-        "error_type": "error",
-        "reason": str(last_error) if last_error else "Unknown error"
-    }
-
+# ============================================================================
+# MAIN
+# ============================================================================
 
 def main():
     parser = argparse.ArgumentParser(
