@@ -59,7 +59,7 @@ from database import (
     get_all_video_ids_for_channel,
     mark_videos_as_deleted,
 )
-from youtube_api import YouTubeFetcher, TranscriptFetcher
+from youtube_api import YouTubeFetcher
 from quota import QuotaTracker, QuotaExhaustedError
 
 
