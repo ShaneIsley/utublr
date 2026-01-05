@@ -51,6 +51,7 @@ from database import (
     insert_channel_stats,
     upsert_video,
     insert_video_stats,
+    insert_video_stats_batch,
     upsert_chapters,
     insert_transcript,
     insert_comments,
@@ -382,11 +383,15 @@ def fetch_channel_data(
         else:
             processed_ids = set()
         
-        # Process videos in batches
+        # Process videos in batches (YouTube API max is 50 per request)
         if video_ids_to_fetch:
-            log.info(f"Fetching metadata for {len(video_ids_to_fetch)} videos (batch_size={batch_size})")
+            api_batch_size = 50  # YouTube API maximum
+            num_batches = (len(video_ids_to_fetch) + api_batch_size - 1) // api_batch_size
+            log.info(f"Fetching metadata for {len(video_ids_to_fetch)} videos ({num_batches} API calls)")
             
-            for batch_start in range(0, len(video_ids_to_fetch), batch_size):
+            all_stats_to_insert = []
+            
+            for batch_start in range(0, len(video_ids_to_fetch), api_batch_size):
                 # Check time budget
                 remaining_mins = check_time_budget()
                 log.debug(f"Time remaining: {remaining_mins} minutes")
@@ -396,16 +401,15 @@ def fetch_channel_data(
                     log.warning("Insufficient quota for next batch, stopping video fetch")
                     break
                 
-                batch_ids = video_ids_to_fetch[batch_start:batch_start + batch_size]
-                batch_num = batch_start // batch_size + 1
-                total_batches = (len(video_ids_to_fetch) + batch_size - 1) // batch_size
+                batch_ids = video_ids_to_fetch[batch_start:batch_start + api_batch_size]
+                batch_num = batch_start // api_batch_size + 1
                 
-                log.debug(f"Processing batch {batch_num}/{total_batches}: {len(batch_ids)} videos")
+                log.debug(f"Processing batch {batch_num}/{num_batches}: {len(batch_ids)} videos")
                 
                 try:
-                    with LogContext(log, f"Batch {batch_num}/{total_batches}"):
+                    with LogContext(log, f"Batch {batch_num}/{num_batches}"):
                         videos = fetcher.fetch_videos(batch_ids)
-                        quota.use('videos.list', (len(batch_ids) // 50) + 1)
+                        quota.use('videos.list', 1)
                         
                         # Filter by age if specified
                         if max_video_age_days:
@@ -416,11 +420,12 @@ def fetch_channel_data(
                         for video in videos:
                             video_id = video["video_id"]
                             
-                            upsert_video(conn, video)
-                            insert_video_stats(conn, video_id, video["statistics"])
+                            # Batch DB writes - don't commit per row
+                            upsert_video(conn, video, commit=False)
+                            all_stats_to_insert.append((video_id, video["statistics"]))
                             
                             if video.get("chapters"):
-                                upsert_chapters(conn, video_id, video["chapters"])
+                                upsert_chapters(conn, video_id, video["chapters"], commit=False)
                             
                             processed_ids.add(video_id)
                             stats["videos_fetched"] += 1
@@ -428,19 +433,28 @@ def fetch_channel_data(
                             if video_id in new_video_ids:
                                 stats["videos_new"] += 1
                         
+                        # Commit once per API batch
+                        conn.commit()
+                        
                         # Checkpoint: save progress
                         save_progress(conn, channel_id, fetch_id, 'videos', 
                                      processed_ids, len(video_ids_to_fetch))
                     
-                    log.info(f"Batch {batch_num}/{total_batches} committed: "
-                            f"{len(processed_ids)}/{len(video_ids_to_fetch)} videos, "
-                            f"quota: {quota.remaining()} remaining")
+                    # Progress every 10 batches or at end
+                    if batch_num % 10 == 0 or batch_num == num_batches:
+                        log.info(f"Video progress: {batch_num}/{num_batches} batches, "
+                                f"{len(processed_ids)}/{len(video_ids_to_fetch)} videos, "
+                                f"quota: {quota.remaining()} remaining")
                     
                 except Exception as e:
                     log.error(f"Batch {batch_num} failed: {e}")
                     stats["errors"].append(f"Video batch {batch_num}: {str(e)}")
                     # Progress is saved, can resume later
                     raise
+            
+            # Batch insert all stats at once
+            if all_stats_to_insert:
+                insert_video_stats_batch(conn, all_stats_to_insert)
         
         # ================================================================
         # UPDATE STATS FOR EXISTING VIDEOS (incremental only)
@@ -448,30 +462,50 @@ def fetch_channel_data(
         if not backfill and existing_video_ids:
             videos_needing_stats = get_videos_needing_stats_update(conn, channel_id, stats_update_hours)
             
-            if videos_needing_stats and quota.can_afford('videos.list', len(videos_needing_stats) // 50 + 1):
-                log.info(f"Updating stats for {len(videos_needing_stats)} existing videos")
+            if videos_needing_stats:
+                # YouTube API allows 50 videos per request
+                api_batch_size = 50
+                num_api_calls = (len(videos_needing_stats) + api_batch_size - 1) // api_batch_size
                 
-                for batch_start in range(0, len(videos_needing_stats), batch_size):
-                    if not quota.can_afford('videos.list', 1):
-                        log.warning("Insufficient quota for stats update, stopping")
-                        break
+                if quota.can_afford('videos.list', num_api_calls):
+                    log.info(f"Updating stats for {len(videos_needing_stats)} existing videos")
                     
-                    batch_ids = videos_needing_stats[batch_start:batch_start + batch_size]
+                    all_stats_to_insert = []
                     
-                    try:
-                        existing_videos = fetcher.fetch_videos(batch_ids)
-                        quota.use('videos.list', 1)
+                    for batch_start in range(0, len(videos_needing_stats), api_batch_size):
+                        if not quota.can_afford('videos.list', 1):
+                            log.warning("Insufficient quota for stats update, stopping")
+                            break
                         
-                        for video in existing_videos:
-                            insert_video_stats(conn, video["video_id"], video["statistics"])
-                            stats["videos_stats_updated"] += 1
-                    except Exception as e:
-                        log.error(f"Stats update batch failed: {e}")
-                        stats["errors"].append(f"Stats update: {str(e)}")
-                
-                log.info(f"Updated stats for {stats['videos_stats_updated']} videos")
-            else:
-                log.debug(f"Video stats up-to-date or insufficient quota")
+                        batch_ids = videos_needing_stats[batch_start:batch_start + api_batch_size]
+                        batch_num = batch_start // api_batch_size + 1
+                        total_batches = num_api_calls
+                        
+                        try:
+                            existing_videos = fetcher.fetch_videos(batch_ids)
+                            quota.use('videos.list', 1)
+                            
+                            # Collect stats for batch insert
+                            for video in existing_videos:
+                                all_stats_to_insert.append((video["video_id"], video["statistics"]))
+                            
+                            # Progress every 10 batches or at end
+                            if batch_num % 10 == 0 or batch_num == total_batches:
+                                log.info(f"Stats progress: {batch_num}/{total_batches} batches, "
+                                        f"{len(all_stats_to_insert)} videos fetched")
+                                
+                        except Exception as e:
+                            log.error(f"Stats update batch {batch_num} failed: {e}")
+                            stats["errors"].append(f"Stats update: {str(e)}")
+                    
+                    # Batch insert all stats at once
+                    if all_stats_to_insert:
+                        log.debug(f"Inserting {len(all_stats_to_insert)} video stats to database")
+                        stats["videos_stats_updated"] = insert_video_stats_batch(conn, all_stats_to_insert)
+                    
+                    log.info(f"Updated stats for {stats['videos_stats_updated']} videos")
+                else:
+                    log.debug(f"Insufficient quota for stats update ({num_api_calls} calls needed)")
         
         # ================================================================
         # TRANSCRIPTS - Skipped (run fetch_transcripts.py locally)
