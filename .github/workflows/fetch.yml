@@ -26,6 +26,11 @@ on:
         required: false
         type: boolean
         default: false
+      reset_quota:
+        description: 'Reset quota counter (use if quota tracking was corrupted)'
+        required: false
+        type: boolean
+        default: false
   
   # Scheduled runs - 4 times daily
   schedule:
@@ -104,6 +109,10 @@ jobs:
           
           if [ "${{ github.event.inputs.skip_comments }}" == "true" ]; then
             CMD="$CMD --skip-comments"
+          fi
+          
+          if [ "${{ github.event.inputs.reset_quota }}" == "true" ]; then
+            CMD="$CMD --reset-quota"
           fi
           
           echo "Running: $CMD"
