@@ -13,7 +13,7 @@ import re
 import sys
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import wraps
 from typing import Optional, Callable, Any
 
@@ -312,6 +312,104 @@ class YouTubeFetcher:
         
         log.debug(f"Fetched {len(video_ids)} video IDs from playlist in {page_count} pages")
         return video_ids
+    
+    @retry_with_backoff()
+    def _search_channel_videos_page(
+        self, 
+        channel_id: str, 
+        published_after: datetime = None,
+        page_token: str = None
+    ) -> dict:
+        """Search for videos from a channel, ordered by date (internal, with retry)."""
+        self._rate_limit()
+        
+        kwargs = {
+            "part": "id",
+            "channelId": channel_id,
+            "type": "video",
+            "order": "date",
+            "maxResults": 50,
+        }
+        
+        if published_after:
+            # Format as RFC 3339
+            if published_after.tzinfo is None:
+                published_after = published_after.replace(tzinfo=timezone.utc)
+            kwargs["publishedAfter"] = published_after.strftime("%Y-%m-%dT%H:%M:%SZ")
+        
+        if page_token:
+            kwargs["pageToken"] = page_token
+            
+        request = self.youtube.search().list(**kwargs)
+        return request.execute()
+    
+    def search_channel_videos(
+        self,
+        channel_id: str,
+        published_after: datetime = None,
+        known_video_ids: set = None,
+        max_results: int = None,
+    ) -> tuple[list[str], int]:
+        """
+        Search for videos from a channel, ordered by date (newest first).
+        
+        This uses the search API (100 units/call) but allows early stopping
+        when we encounter videos we already have.
+        
+        Args:
+            channel_id: YouTube channel ID
+            published_after: Only return videos published after this time
+            known_video_ids: Set of video IDs we already have - stop when we hit one
+            max_results: Maximum videos to return
+            
+        Returns:
+            Tuple of (list of video IDs, number of API calls made)
+        """
+        log.debug(f"Searching for new videos from channel {channel_id}")
+        video_ids = []
+        next_page_token = None
+        api_calls = 0
+        
+        while True:
+            response = self._search_channel_videos_page(
+                channel_id, 
+                published_after=published_after,
+                page_token=next_page_token
+            )
+            api_calls += 1
+            
+            found_known = False
+            for item in response.get("items", []):
+                video_id = item.get("id", {}).get("videoId")
+                if not video_id:
+                    continue
+                    
+                # Stop if we hit a video we already have
+                if known_video_ids and video_id in known_video_ids:
+                    log.debug(f"Found known video {video_id}, stopping search")
+                    found_known = True
+                    break
+                    
+                video_ids.append(video_id)
+                
+                if max_results and len(video_ids) >= max_results:
+                    log.debug(f"Reached max_results ({max_results}), stopping")
+                    return video_ids, api_calls
+            
+            if found_known:
+                break
+                
+            next_page_token = response.get("nextPageToken")
+            if not next_page_token:
+                break
+                
+            # Safety limit - don't paginate forever
+            if api_calls >= 10:
+                log.warning(f"Search pagination limit reached ({api_calls} calls), stopping")
+                break
+        
+        log.debug(f"Search found {len(video_ids)} new videos in {api_calls} API calls")
+        return video_ids, api_calls
     
     @retry_with_backoff()
     def _fetch_videos_batch(self, video_ids: list[str]) -> list[dict]:
