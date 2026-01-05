@@ -7,6 +7,7 @@ Features:
 - Smart incremental updates to minimize redundant API requests
 - Quota tracking to prevent exceeding daily limits
 - Checkpointing for resumable operations
+- Parallel comment fetching for faster processing
 - Detailed DEBUG logging for development
 
 Usage:
@@ -20,6 +21,8 @@ import argparse
 import os
 import sys
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -66,6 +69,7 @@ from quota import QuotaTracker, QuotaExhaustedError
 # Configuration
 DEFAULT_BATCH_SIZE = 10  # Small batches for safety with popular videos
 MAX_RUNTIME_MINUTES = 300  # 5 hours default
+DEFAULT_COMMENT_WORKERS = 3  # Conservative default for parallel comment fetching
 
 
 def load_config(config_path: str) -> dict:
@@ -75,6 +79,117 @@ def load_config(config_path: str) -> dict:
         config = yaml.safe_load(f)
     log.debug(f"Loaded {len(config.get('channels', []))} channels from config")
     return config
+
+
+def fetch_comments_parallel(
+    fetcher: YouTubeFetcher,
+    conn,
+    quota: QuotaTracker,
+    video_ids: list[str],
+    max_comments_per_video: int,
+    backfill: bool,
+    num_workers: int = DEFAULT_COMMENT_WORKERS,
+    progress_callback = None,
+) -> tuple[int, int, list[str]]:
+    """
+    Fetch comments for multiple videos in parallel.
+    
+    Args:
+        fetcher: YouTubeFetcher instance
+        conn: Database connection
+        quota: QuotaTracker instance  
+        video_ids: List of video IDs to fetch comments for
+        max_comments_per_video: Max comments per video
+        backfill: If True, fetch all comments; otherwise only new ones
+        num_workers: Number of parallel workers (default: 3)
+        progress_callback: Optional callback(processed, total, new_comments)
+        
+    Returns:
+        Tuple of (total_comments, new_comments, errors)
+    """
+    if not video_ids:
+        return 0, 0, []
+    
+    # Thread-safe counters
+    lock = threading.Lock()
+    total_comments = 0
+    new_comments = 0
+    errors = []
+    processed = 0
+    stop_flag = threading.Event()
+    
+    # Pre-fetch 'since' times for incremental mode (avoid DB access in threads)
+    since_times = {}
+    if not backfill:
+        for video_id in video_ids:
+            since_times[video_id] = get_latest_comment_time(conn, video_id)
+    
+    def fetch_single_video(video_id: str) -> tuple[str, list, int, str]:
+        """Fetch comments for a single video. Returns (video_id, comments, quota_used, error)."""
+        if stop_flag.is_set():
+            return video_id, [], 0, "stopped"
+            
+        since = since_times.get(video_id) if not backfill else None
+        
+        try:
+            comments = fetcher.fetch_comments(
+                video_id,
+                since=since,
+                max_results=max_comments_per_video
+            )
+            quota_used = (len(comments) // 100) + 1 if comments else 1
+            return video_id, comments, quota_used, None
+        except Exception as e:
+            error_msg = str(e)
+            # Don't log disabled comments as errors
+            if "commentsDisabled" not in error_msg:
+                log.warning(f"Comment fetch failed for {video_id}: {e}")
+            return video_id, [], 1, error_msg
+    
+    # Process with thread pool
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        # Submit all tasks
+        futures = {executor.submit(fetch_single_video, vid): vid for vid in video_ids}
+        
+        for future in as_completed(futures):
+            video_id = futures[future]
+            
+            # Check quota before processing result
+            with lock:
+                if not quota.can_afford('commentThreads.list', 1):
+                    log.warning("Insufficient quota, stopping comment fetch")
+                    stop_flag.set()
+                    break
+            
+            try:
+                vid, comments, quota_used, error = future.result()
+                
+                with lock:
+                    # Update quota
+                    quota.use('commentThreads.list', quota_used)
+                    
+                    if error and "stopped" not in error:
+                        errors.append(f"Comments {vid}: {error}")
+                    
+                    if comments:
+                        # Database write - SQLite handles this safely with WAL mode
+                        new_count = insert_comments(conn, comments)
+                        total_comments += len(comments)
+                        new_comments += new_count
+                        log.debug(f"Video {vid}: {len(comments)} comments ({new_count} new)")
+                    
+                    processed += 1
+                    
+                    # Progress callback
+                    if progress_callback and processed % 5 == 0:
+                        progress_callback(processed, len(video_ids), new_comments)
+                        
+            except Exception as e:
+                with lock:
+                    errors.append(f"Comments {video_id}: {str(e)}")
+                    processed += 1
+    
+    return total_comments, new_comments, errors
 
 
 def fetch_channel_data(
@@ -87,6 +202,8 @@ def fetch_channel_data(
     max_video_age_days: int = None,
     max_comments_per_video: int = 500,
     max_replies_per_comment: int = 10,
+    max_comment_videos: int = 200,
+    comment_workers: int = DEFAULT_COMMENT_WORKERS,
     stats_update_hours: int = 6,
     comments_update_hours: int = 24,
     comments_update_hours_new: int = 6,
@@ -102,6 +219,7 @@ def fetch_channel_data(
     Features:
     - Batched commits with checkpointing for resume
     - Quota tracking and early abort
+    - Parallel comment fetching for faster processing
     - Time limit awareness
     - Tiered comment updates (more frequent for new videos)
     
@@ -111,6 +229,8 @@ def fetch_channel_data(
     Args:
         batch_size: Number of videos to process before committing (default: 10)
         max_runtime_minutes: Stop if approaching this runtime limit
+        max_comments_per_video: Max comment threads per video (default: 500)
+        max_comment_videos: Max videos to fetch comments for per run (default: 200)
         comments_update_hours: Hours between comment re-fetch for older videos (default: 24)
         comments_update_hours_new: Hours between comment re-fetch for new videos (default: 6)
         new_video_days: Videos younger than this are "new" (default: 7)
@@ -353,74 +473,54 @@ def fetch_channel_data(
                     f"Run fetch_transcripts.py locally to download them.")
         
         # ================================================================
-        # COMMENTS - Only for videos needing updates
+        # COMMENTS - Only for videos needing updates (parallel)
         # ================================================================
         if fetch_comments:
             if backfill:
-                videos_for_comments = all_video_ids[:max_videos] if max_videos else all_video_ids
-                log.info(f"Backfill: fetching comments for all {len(videos_for_comments)} videos")
+                # Even in backfill, limit to most recent videos per run
+                videos_for_comments = all_video_ids[:max_comment_videos] if max_comment_videos else all_video_ids
+                log.info(f"Backfill: fetching comments for {len(videos_for_comments)} videos (limited to {max_comment_videos})")
             else:
                 videos_for_comments = get_videos_needing_comments(
                     conn, 
                     channel_id, 
                     hours_since_last=comments_update_hours,
                     hours_since_last_new=comments_update_hours_new,
-                    new_video_days=new_video_days
+                    new_video_days=new_video_days,
+                    limit=max_comment_videos
                 )
             
             if videos_for_comments:
-                log.info(f"Fetching comments for {len(videos_for_comments)} videos")
-                
-                # Check for progress
+                # Check for progress (resume from checkpoint)
                 comment_progress = get_progress(conn, channel_id, fetch_id, 'comments')
                 if comment_progress:
                     processed_comment_video_ids = comment_progress['processed_ids']
                     videos_for_comments = [v for v in videos_for_comments 
                                           if v not in processed_comment_video_ids]
-                else:
-                    processed_comment_video_ids = set()
                 
-                total_new_comments = 0
-                
-                for i, video_id in enumerate(videos_for_comments):
-                    # Check time and quota
-                    if i % 5 == 0:
-                        check_time_budget()
+                if videos_for_comments:
+                    workers = comment_workers if comment_workers > 1 else 1
+                    log.info(f"Fetching comments for {len(videos_for_comments)} videos "
+                            f"({workers} worker{'s' if workers > 1 else ''})")
                     
-                    if not quota.can_afford('commentThreads.list', 1):
-                        log.warning("Insufficient quota for comments, stopping")
-                        break
+                    def progress_callback(processed, total, new_comments):
+                        log.info(f"Comment progress: {processed}/{total} videos, {new_comments} new comments")
                     
-                    since = None if backfill else get_latest_comment_time(conn, video_id)
+                    total_fetched, total_new, comment_errors = fetch_comments_parallel(
+                        fetcher=fetcher,
+                        conn=conn,
+                        quota=quota,
+                        video_ids=videos_for_comments,
+                        max_comments_per_video=max_comments_per_video,
+                        backfill=backfill,
+                        num_workers=workers,
+                        progress_callback=progress_callback,
+                    )
                     
-                    try:
-                        comments = fetcher.fetch_comments(
-                            video_id, 
-                            since=since,
-                            max_results=max_comments_per_video
-                        )
-                        quota.use('commentThreads.list', (len(comments) // 100) + 1 if comments else 1)
-                        
-                        if comments:
-                            new_count = insert_comments(conn, comments)
-                            total_new_comments += new_count
-                            stats["comments_fetched"] += len(comments)
-                            log.debug(f"Video {video_id}: {len(comments)} comments ({new_count} new)")
-                        
-                        processed_comment_video_ids.add(video_id)
-                        
-                        # Checkpoint every 5 videos
-                        if (i + 1) % 5 == 0:
-                            save_progress(conn, channel_id, fetch_id, 'comments',
-                                         processed_comment_video_ids, len(videos_for_comments))
-                            log.info(f"Comment progress: {i + 1}/{len(videos_for_comments)} videos, "
-                                    f"{total_new_comments} new comments")
-                            
-                    except Exception as e:
-                        log.warning(f"Comment fetch failed for {video_id}: {e}")
-                        stats["errors"].append(f"Comments {video_id}: {str(e)}")
-                
-                log.info(f"Fetched {stats['comments_fetched']} comments ({total_new_comments} new)")
+                    stats["comments_fetched"] += total_fetched
+                    stats["errors"].extend(comment_errors)
+                    
+                    log.info(f"Fetched {total_fetched} comments ({total_new} new)")
             else:
                 log.debug(f"All video comments up-to-date")
         
@@ -630,6 +730,12 @@ def main():
         help="Maximum replies per comment (default: 10, prevents blowup on viral comments)"
     )
     parser.add_argument(
+        "--max-comment-videos",
+        type=int,
+        default=200,
+        help="Maximum videos to fetch comments for per run (default: 200, prevents extremely long runs)"
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=DEFAULT_BATCH_SIZE,
@@ -658,6 +764,12 @@ def main():
         type=int,
         default=7,
         help="Videos younger than this many days are 'new' and get more frequent comment updates (default: 7)"
+    )
+    parser.add_argument(
+        "--comment-workers",
+        type=int,
+        default=DEFAULT_COMMENT_WORKERS,
+        help=f"Parallel workers for comment fetching (default: {DEFAULT_COMMENT_WORKERS}, use 1 to disable)"
     )
     parser.add_argument(
         "--max-runtime-minutes",
@@ -815,6 +927,8 @@ def main():
                 max_video_age_days=args.max_video_age or channel_options.get("max_video_age_days"),
                 max_comments_per_video=get_option("max_comments_per_video", args.max_comments),
                 max_replies_per_comment=get_option("max_replies_per_comment", args.max_replies),
+                max_comment_videos=get_option("max_comment_videos", args.max_comment_videos),
+                comment_workers=get_option("comment_workers", args.comment_workers),
                 batch_size=args.batch_size,
                 stats_update_hours=get_option("stats_update_hours", args.stats_update_hours),
                 comments_update_hours=get_option("comments_update_hours", args.comments_update_hours),
