@@ -467,7 +467,8 @@ def get_videos_needing_comments(
     channel_id: str, 
     hours_since_last: int = 24,
     hours_since_last_new: int = 6,
-    new_video_days: int = 7
+    new_video_days: int = 7,
+    limit: int = None
 ) -> list[str]:
     """
     Get video IDs that need comment updates.
@@ -481,6 +482,7 @@ def get_videos_needing_comments(
         hours_since_last: Hours before re-fetching comments for older videos (default: 24)
         hours_since_last_new: Hours before re-fetching for new videos (default: 6)
         new_video_days: Videos younger than this many days are "new" (default: 7)
+        limit: Maximum total videos to return (default: None = unlimited)
     
     Returns:
         List of video IDs needing comment updates, newest first
@@ -501,8 +503,19 @@ def get_videos_needing_comments(
         ORDER BY v.published_at DESC
     """, (channel_id, new_video_days, hours_since_last_new)).fetchall()
     
+    new_ids = [row[0] for row in new_videos]
+    
+    # Calculate how many older videos we can fetch
+    older_limit = None
+    if limit is not None:
+        older_limit = max(0, limit - len(new_ids))
+        if older_limit == 0:
+            log.debug(f"Videos needing comments: {len(new_ids)} new (<{new_video_days}d), "
+                      f"limit reached, skipping older videos")
+            return new_ids[:limit]
+    
     # Get older videos needing updates (less frequent)
-    older_videos = conn.execute("""
+    older_query = """
         SELECT v.video_id 
         FROM videos v
         LEFT JOIN (
@@ -515,9 +528,11 @@ def get_videos_needing_comments(
         AND (c.last_fetch IS NULL 
              OR datetime(c.last_fetch) < datetime('now', '-' || ? || ' hours'))
         ORDER BY v.published_at DESC
-    """, (channel_id, new_video_days, hours_since_last)).fetchall()
+    """
+    if older_limit is not None:
+        older_query += f" LIMIT {older_limit}"
     
-    new_ids = [row[0] for row in new_videos]
+    older_videos = conn.execute(older_query, (channel_id, new_video_days, hours_since_last)).fetchall()
     older_ids = [row[0] for row in older_videos]
     
     log.debug(f"Videos needing comments: {len(new_ids)} new (<{new_video_days}d), "
