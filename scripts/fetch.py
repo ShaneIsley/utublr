@@ -39,6 +39,7 @@ from database import (
     get_connection,
     init_database,
     get_last_fetch_time,
+    get_latest_video_publish_date,
     get_existing_video_ids,
     get_videos_needing_stats_update,
     get_videos_without_transcripts,
@@ -222,6 +223,7 @@ def fetch_channel_data(
     comments_update_hours: int = 24,
     comments_update_hours_new: int = 6,
     new_video_days: int = 7,
+    video_discovery_mode: str = "auto",
     batch_size: int = DEFAULT_BATCH_SIZE,
     backfill: bool = False,
     start_time: float = None,
@@ -248,6 +250,10 @@ def fetch_channel_data(
         comments_update_hours: Hours between comment re-fetch for older videos (default: 24)
         comments_update_hours_new: Hours between comment re-fetch for new videos (default: 6)
         new_video_days: Videos younger than this are "new" (default: 7)
+        video_discovery_mode: How to discover new videos:
+            - "auto": Use search API for incremental, playlist for backfill (default)
+            - "search": Always use search API (100 units/call, stops at known videos)
+            - "playlist": Always use playlist API (1 unit/50 videos, fetches all)
     
     Returns:
         Dict with counts of fetched items and status.
@@ -347,28 +353,73 @@ def fetch_channel_data(
         if not uploads_playlist:
             raise ValueError("Could not find uploads playlist")
         
-        with LogContext(log, "Fetching video list"):
-            all_video_ids = fetcher.fetch_playlist_video_ids(uploads_playlist, max_results=max_videos)
-            quota.use('playlistItems.list', (len(all_video_ids) // 50) + 1)
-        
-        log.info(f"Found {len(all_video_ids)} videos in uploads playlist")
-        
         # ================================================================
-        # DETECT DELETED VIDEOS
+        # VIDEO DISCOVERY - Choose strategy based on mode
         # ================================================================
-        current_video_ids = set(all_video_ids)
-        deleted_video_ids = existing_video_ids - current_video_ids
+        # Determine effective discovery mode
+        effective_mode = video_discovery_mode
+        if effective_mode == "auto":
+            # Use search for incremental (cheaper when few new videos)
+            # Use playlist for backfill (cheaper when fetching all)
+            effective_mode = "playlist" if backfill else "search"
         
-        if deleted_video_ids:
-            log.info(f"Detected {len(deleted_video_ids)} videos no longer on channel")
-            deleted_count = mark_videos_as_deleted(conn, list(deleted_video_ids))
-            stats["videos_deleted"] = deleted_count
-            log.debug(f"Marked {deleted_count} videos as deleted")
+        all_video_ids = []
+        new_video_ids = set()
+        search_api_calls = 0
         
-        # Determine which videos need full metadata fetch
-        new_video_ids = current_video_ids - existing_video_ids
+        if effective_mode == "search" and existing_video_ids:
+            # Use search API - stops when we hit known videos
+            # More efficient when there are only a few new videos
+            latest_publish = get_latest_video_publish_date(conn, channel_id)
+            
+            log.info(f"Using search API for video discovery (latest video: {latest_publish})")
+            
+            with LogContext(log, "Searching for new videos"):
+                new_ids, search_api_calls = fetcher.search_channel_videos(
+                    channel_id,
+                    published_after=latest_publish,
+                    known_video_ids=existing_video_ids,
+                    max_results=max_videos,
+                )
+                quota.use('search.list', search_api_calls * 100)  # 100 units per search call
+            
+            new_video_ids = set(new_ids)
+            # For search mode, we only have new videos - combine with existing for full list
+            all_video_ids = new_ids + list(existing_video_ids)
+            
+            log.info(f"Search found {len(new_video_ids)} new videos ({search_api_calls} API calls, {search_api_calls * 100} quota)")
+            
+        else:
+            # Use playlist API - fetches all video IDs
+            # More efficient for backfill or when search isn't appropriate
+            log.info(f"Using playlist API for video discovery")
+            
+            with LogContext(log, "Fetching video list"):
+                all_video_ids = fetcher.fetch_playlist_video_ids(uploads_playlist, max_results=max_videos)
+                quota.use('playlistItems.list', (len(all_video_ids) // 50) + 1)
+            
+            log.info(f"Found {len(all_video_ids)} videos in uploads playlist")
+            
+            # Determine new videos
+            current_video_ids = set(all_video_ids)
+            new_video_ids = current_video_ids - existing_video_ids
+        
         log.info(f"New videos to fetch: {len(new_video_ids)}")
         
+        # ================================================================
+        # DETECT DELETED VIDEOS (only reliable with playlist mode)
+        # ================================================================
+        if effective_mode == "playlist":
+            current_video_ids = set(all_video_ids)
+            deleted_video_ids = existing_video_ids - current_video_ids
+            
+            if deleted_video_ids:
+                log.info(f"Detected {len(deleted_video_ids)} videos no longer on channel")
+                deleted_count = mark_videos_as_deleted(conn, list(deleted_video_ids))
+                stats["videos_deleted"] = deleted_count
+                log.debug(f"Marked {deleted_count} videos as deleted")
+        
+        # Determine which videos need full metadata fetch
         if backfill:
             video_ids_to_fetch = all_video_ids
         else:
@@ -783,6 +834,14 @@ def main():
         help="Maximum videos to fetch comments for per run (default: 200, prevents extremely long runs)"
     )
     parser.add_argument(
+        "--video-discovery-mode",
+        type=str,
+        choices=["auto", "search", "playlist"],
+        default="auto",
+        help="Video discovery strategy: auto (search for incremental, playlist for backfill), "
+             "search (100 units/call, stops at known), playlist (1 unit/50 videos, fetches all)"
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=DEFAULT_BATCH_SIZE,
@@ -976,6 +1035,7 @@ def main():
                 max_replies_per_comment=get_option("max_replies_per_comment", args.max_replies),
                 max_comment_videos=get_option("max_comment_videos", args.max_comment_videos),
                 comment_workers=get_option("comment_workers", args.comment_workers),
+                video_discovery_mode=get_option("video_discovery_mode", args.video_discovery_mode),
                 batch_size=args.batch_size,
                 stats_update_hours=get_option("stats_update_hours", args.stats_update_hours),
                 comments_update_hours=get_option("comments_update_hours", args.comments_update_hours),
