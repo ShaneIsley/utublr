@@ -417,7 +417,7 @@ def get_latest_video_publish_date(conn, channel_id: str) -> Optional[datetime]:
     result = conn.execute("""
         SELECT MAX(published_at) 
         FROM videos 
-        WHERE channel_id = ? AND is_deleted = 0
+        WHERE channel_id = ?
     """, (channel_id,)).fetchone()
     
     if result and result[0]:
