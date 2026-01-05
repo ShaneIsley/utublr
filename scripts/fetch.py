@@ -381,7 +381,7 @@ def fetch_channel_data(
                     known_video_ids=existing_video_ids,
                     max_results=max_videos,
                 )
-                quota.use('search.list', search_api_calls * 100)  # 100 units per search call
+                quota.use('search.list', search_api_calls)  # 100 units per search call (cost is in COSTS dict)
             
             new_video_ids = set(new_ids)
             # For search mode, we only have new videos - combine with existing for full list
