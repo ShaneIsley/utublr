@@ -9,10 +9,13 @@
 # - max_videos: Limit videos to fetch (most recent first)
 # - max_video_age_days: Only fetch videos within this many days
 # - fetch_comments: true/false (default: true)
-# - fetch_transcripts: true/false (default: true)
 # - comments_update_hours: Hours before re-fetching comments (default: 24)
 # - comments_update_hours_new: Hours for videos < 7 days old (default: 6)
 # - new_video_days: Videos younger than this are "new" (default: 7)
+#
+# NOTE: Transcripts are fetched separately using fetch_transcripts.py
+# because YouTube blocks transcript requests from cloud/CI environments.
+# Run locally: python fetch_transcripts.py --channel @YourChannel
 
 channels:
   # Simple format - just the identifier
@@ -23,9 +26,10 @@ channels:
   - "@mojo_monday_gpu"
   - "@podsaveamerica"
   - "@GithubAwesome"
+  - "@code4AI"
   
   # Detailed format with options
-  # - identifier: "@bulwarkmedia"
+  # - identifier: "@mkbhd"
   #   max_videos: 500           # Only most recent 500 videos
   #   max_video_age_days: 365   # Only videos from last year
   #   fetch_comments: true
@@ -47,12 +51,19 @@ settings:
   # Default max comments per video
   max_comments_per_video: 500
   
+  # Max videos to fetch comments for per channel per run
+  # Prevents extremely long runs on large channels
+  max_comment_videos: 200
+  
+  # Parallel workers for comment fetching (1=sequential, 3-5 recommended)
+  comment_workers: 3
+  
   # Comment update frequency
   comments_update_hours: 24        # Default for older videos
-  comments_update_hours_new: 1     # Default for new videos (< new_video_days old)
-  new_video_days: 2                # Videos younger than this get more frequent updates
+  comments_update_hours_new: 6     # Default for new videos (< new_video_days old)
+  new_video_days: 7                # Videos younger than this get more frequent updates
   
   # Recommended constraints for large-scale tracking:
   # - Set max_video_age_days: 90-365 for ongoing analysis
   # - Set max_videos: 500-2000 for initial backfill
-  # - Use skip_comments for channels with high volume
+  # - Use fetch_comments: false for channels with high volume
