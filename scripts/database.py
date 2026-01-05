@@ -646,7 +646,7 @@ def insert_channel_stats(conn, channel_id: str, stats: dict) -> None:
     conn.commit()
 
 
-def upsert_video(conn, video: dict) -> None:
+def upsert_video(conn, video: dict, commit: bool = True) -> None:
     """Insert or update video metadata."""
     now = datetime.now().isoformat()
     
@@ -698,10 +698,11 @@ def upsert_video(conn, video: dict) -> None:
         now,  # first_seen_at (will be ignored on conflict)
         now   # updated_at
     ))
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
-def insert_video_stats(conn, video_id: str, stats: dict) -> None:
+def insert_video_stats(conn, video_id: str, stats: dict, commit: bool = True) -> None:
     """Insert video stats snapshot."""
     now = datetime.now().isoformat()
     conn.execute("""
@@ -714,10 +715,39 @@ def insert_video_stats(conn, video_id: str, stats: dict) -> None:
         stats.get('like_count', 0),
         stats.get('comment_count', 0)
     ))
+    if commit:
+        conn.commit()
+
+
+def insert_video_stats_batch(conn, video_stats: list[tuple[str, dict]]) -> int:
+    """Insert multiple video stats in a single transaction.
+    
+    Args:
+        conn: Database connection
+        video_stats: List of (video_id, stats_dict) tuples
+        
+    Returns:
+        Number of stats inserted
+    """
+    now = datetime.now().isoformat()
+    count = 0
+    for video_id, stats in video_stats:
+        conn.execute("""
+            INSERT OR IGNORE INTO video_stats (video_id, fetched_at, view_count, like_count, comment_count)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            video_id,
+            now,
+            stats.get('view_count', 0),
+            stats.get('like_count', 0),
+            stats.get('comment_count', 0)
+        ))
+        count += 1
     conn.commit()
+    return count
 
 
-def upsert_chapters(conn, video_id: str, chapters: list[dict]) -> None:
+def upsert_chapters(conn, video_id: str, chapters: list[dict], commit: bool = True) -> None:
     """Replace chapters for a video."""
     conn.execute("DELETE FROM chapters WHERE video_id = ?", (video_id,))
     for i, chapter in enumerate(chapters):
@@ -731,7 +761,8 @@ def upsert_chapters(conn, video_id: str, chapters: list[dict]) -> None:
             chapter.get('start_seconds'),
             chapter.get('end_seconds')
         ,))
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def insert_transcript(conn, video_id: str, transcript: dict) -> bool:
