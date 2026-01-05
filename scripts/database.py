@@ -412,6 +412,19 @@ def get_last_fetch_time(conn, channel_id: str) -> Optional[datetime]:
     return None
 
 
+def get_latest_video_publish_date(conn, channel_id: str) -> Optional[datetime]:
+    """Get the publish date of the most recent video for a channel."""
+    result = conn.execute("""
+        SELECT MAX(published_at) 
+        FROM videos 
+        WHERE channel_id = ? AND is_deleted = 0
+    """, (channel_id,)).fetchone()
+    
+    if result and result[0]:
+        return datetime.fromisoformat(result[0].replace("Z", "+00:00"))
+    return None
+
+
 def get_existing_video_ids(conn, channel_id: str) -> set[str]:
     """Get all video IDs already in database for a channel."""
     result = conn.execute("""
