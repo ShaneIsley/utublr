@@ -82,7 +82,7 @@ def load_config(config_path: str) -> dict:
 
 
 def fetch_comments_parallel(
-    fetcher: YouTubeFetcher,
+    api_key: str,
     conn,
     quota: QuotaTracker,
     video_ids: list[str],
@@ -94,8 +94,10 @@ def fetch_comments_parallel(
     """
     Fetch comments for multiple videos in parallel.
     
+    Creates a separate API client per thread to avoid SSL/connection issues.
+    
     Args:
-        fetcher: YouTubeFetcher instance
+        api_key: YouTube API key (each thread creates its own client)
         conn: Database connection
         quota: QuotaTracker instance  
         video_ids: List of video IDs to fetch comments for
@@ -118,6 +120,15 @@ def fetch_comments_parallel(
     processed = 0
     stop_flag = threading.Event()
     
+    # Thread-local storage for per-thread API clients
+    thread_local = threading.local()
+    
+    def get_thread_fetcher():
+        """Get or create a YouTubeFetcher for the current thread."""
+        if not hasattr(thread_local, 'fetcher'):
+            thread_local.fetcher = YouTubeFetcher(api_key=api_key)
+        return thread_local.fetcher
+    
     # Pre-fetch 'since' times for incremental mode (avoid DB access in threads)
     since_times = {}
     if not backfill:
@@ -128,7 +139,9 @@ def fetch_comments_parallel(
         """Fetch comments for a single video. Returns (video_id, comments, quota_used, error)."""
         if stop_flag.is_set():
             return video_id, [], 0, "stopped"
-            
+        
+        # Get thread-local fetcher
+        fetcher = get_thread_fetcher()
         since = since_times.get(video_id) if not backfill else None
         
         try:
@@ -507,7 +520,7 @@ def fetch_channel_data(
                         log.info(f"Comment progress: {processed}/{total} videos, {new_comments} new comments")
                     
                     total_fetched, total_new, comment_errors = fetch_comments_parallel(
-                        fetcher=fetcher,
+                        api_key=fetcher.api_key,
                         conn=conn,
                         quota=quota,
                         video_ids=videos_for_comments,
