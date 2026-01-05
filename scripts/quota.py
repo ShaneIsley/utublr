@@ -107,6 +107,14 @@ class QuotaTracker:
         except Exception as e:
             log.warning(f"Could not save quota state: {e}")
     
+    def reset(self):
+        """Reset quota counter to 0. Use if quota tracking was corrupted."""
+        self.used = 0
+        self.session_used = 0
+        self.operations = {}
+        self._save_state()
+        log.info(f"Quota reset to 0 for {self.today}")
+    
     def use(self, operation: str, count: int = 1) -> int:
         """
         Record quota usage for an operation.
