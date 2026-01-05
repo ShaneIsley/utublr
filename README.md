@@ -168,6 +168,8 @@ python test_transcript.py --channel @samwitteveenai --limit 50 --quiet
 | `--max-video-age` | unlimited | Only fetch videos within N days |
 | `--max-comments` | 100 | Max comments per video |
 | `--max-replies` | 10 | Max replies per comment |
+| `--max-comment-videos` | 200 | Max videos to fetch comments for per run |
+| `--comment-workers` | 3 | Parallel workers for comment fetching (1=sequential) |
 | `--batch-size` | 10 | Videos per batch/commit |
 | `--stats-update-hours` | 6 | Skip stats if updated within N hours |
 | `--comments-update-hours` | 24 | Skip comments if fetched within N hours |
