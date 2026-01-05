@@ -894,6 +894,11 @@ def main():
         default=10000,
         help="Daily API quota limit (default: 10000)"
     )
+    parser.add_argument(
+        "--reset-quota",
+        action="store_true",
+        help="Reset today's quota counter to 0 (use if quota tracking was corrupted)"
+    )
     
     args = parser.parse_args()
     
@@ -912,6 +917,18 @@ def main():
     
     # Initialize quota tracker with database connection for persistence
     quota = QuotaTracker(daily_limit=args.quota_limit, conn=conn)
+    
+    # Reset quota if requested
+    if args.reset_quota:
+        log.info("Resetting quota counter to 0...")
+        quota.reset()
+        log.info("Quota reset complete")
+    
+    # Check if quota is already exhausted
+    if quota.used >= quota.daily_limit:
+        log.error(f"Quota already exhausted: {quota.used}/{quota.daily_limit}")
+        log.error("Use --reset-quota if you believe this is incorrect, or wait until quota resets at midnight Pacific time")
+        return
     
     # Export mode
     if args.export:
