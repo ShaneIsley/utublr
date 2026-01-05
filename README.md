@@ -169,6 +169,7 @@ python test_transcript.py --channel @samwitteveenai --limit 50 --quiet
 | `--max-comments` | 100 | Max comments per video |
 | `--max-replies` | 10 | Max replies per comment |
 | `--max-comment-videos` | 200 | Max videos to fetch comments for per run |
+| `--video-discovery-mode` | auto | Video discovery: auto, search, or playlist |
 | `--comment-workers` | 3 | Parallel workers for comment fetching (1=sequential) |
 | `--batch-size` | 10 | Videos per batch/commit |
 | `--stats-update-hours` | 6 | Skip stats if updated within N hours |
