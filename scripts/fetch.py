@@ -25,6 +25,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable, Optional
 
 import yaml
 
@@ -65,14 +66,17 @@ from database import (
     get_all_video_ids_for_channel,
     mark_videos_as_deleted,
 )
+from googleapiclient.errors import HttpError
 from youtube_api import YouTubeFetcher
 from quota import QuotaTracker, QuotaExhaustedError
 
 
-# Configuration
+# Configuration constants
 DEFAULT_BATCH_SIZE = 10  # Small batches for safety with popular videos
 MAX_RUNTIME_MINUTES = 300  # 5 hours default
 DEFAULT_COMMENT_WORKERS = 3  # Conservative default for parallel comment fetching
+PROGRESS_LOG_INTERVAL = 10  # Log progress every N batches
+PROGRESS_CALLBACK_INTERVAL = 5  # Call progress callback every N videos
 
 
 def load_config(config_path: str) -> dict:
@@ -92,7 +96,7 @@ def fetch_comments_parallel(
     max_comments_per_video: int,
     backfill: bool,
     num_workers: int = DEFAULT_COMMENT_WORKERS,
-    progress_callback = None,
+    progress_callback: Optional[Callable[[int, int, int], None]] = None,
 ) -> tuple[int, int, list[str]]:
     """
     Fetch comments for multiple videos in parallel.
@@ -138,15 +142,15 @@ def fetch_comments_parallel(
         for video_id in video_ids:
             since_times[video_id] = get_latest_comment_time(conn, video_id)
     
-    def fetch_single_video(video_id: str) -> tuple[str, list, int, str]:
+    def fetch_single_video(video_id: str) -> tuple[str, list, int, str | None]:
         """Fetch comments for a single video. Returns (video_id, comments, quota_used, error)."""
         if stop_flag.is_set():
             return video_id, [], 0, "stopped"
-        
+
         # Get thread-local fetcher
         fetcher = get_thread_fetcher()
         since = since_times.get(video_id) if not backfill else None
-        
+
         try:
             comments = fetcher.fetch_comments(
                 video_id,
@@ -155,12 +159,22 @@ def fetch_comments_parallel(
             )
             quota_used = (len(comments) // 100) + 1 if comments else 1
             return video_id, comments, quota_used, None
-        except Exception as e:
+        except HttpError as e:
+            # Handle YouTube API errors specifically
             error_msg = str(e)
-            # Don't log disabled comments as errors
-            if "commentsDisabled" not in error_msg:
-                log.warning(f"Comment fetch failed for {video_id}: {e}")
+            if "commentsDisabled" in error_msg or e.resp.status == 403:
+                log.debug(f"Comments disabled for {video_id}")
+            else:
+                log.warning(f"HTTP error fetching comments for {video_id}: {e}")
             return video_id, [], 1, error_msg
+        except (ConnectionError, TimeoutError, OSError) as e:
+            # Handle network-related errors
+            log.warning(f"Network error fetching comments for {video_id}: {e}")
+            return video_id, [], 1, str(e)
+        except Exception as e:
+            # Catch-all for unexpected errors in thread context
+            log.warning(f"Unexpected error fetching comments for {video_id}: {type(e).__name__}: {e}")
+            return video_id, [], 1, str(e)
     
     # Process with thread pool
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
@@ -179,29 +193,34 @@ def fetch_comments_parallel(
             
             try:
                 vid, comments, quota_used, error = future.result()
-                
+
                 with lock:
                     # Update quota
                     quota.use('commentThreads.list', quota_used)
-                    
+
                     if error and "stopped" not in error:
                         errors.append(f"Comments {vid}: {error}")
-                    
+
                     if comments:
                         # Database write - SQLite handles this safely with WAL mode
                         new_count = insert_comments(conn, comments)
                         total_comments += len(comments)
                         new_comments += new_count
                         log.debug(f"Video {vid}: {len(comments)} comments ({new_count} new)")
-                    
+
                     processed += 1
-                    
+
                     # Progress callback
-                    if progress_callback and processed % 5 == 0:
+                    if progress_callback and processed % PROGRESS_CALLBACK_INTERVAL == 0:
                         progress_callback(processed, len(video_ids), new_comments)
-                        
+
+            except (KeyboardInterrupt, SystemExit):
+                # Re-raise system-level interrupts
+                raise
             except Exception as e:
+                # Handle any other errors from future execution
                 with lock:
+                    log.debug(f"Future result error for {video_id}: {type(e).__name__}: {e}")
                     errors.append(f"Comments {video_id}: {str(e)}")
                     processed += 1
     
@@ -575,8 +594,8 @@ def fetch_channel_data(
                         save_progress(conn, channel_id, fetch_id, 'videos', 
                                      processed_ids, len(video_ids_to_fetch))
                     
-                    # Progress every 10 batches or at end
-                    if batch_num % 10 == 0 or batch_num == num_batches:
+                    # Progress every N batches or at end
+                    if batch_num % PROGRESS_LOG_INTERVAL == 0 or batch_num == num_batches:
                         log.info(f"Video progress: {batch_num}/{num_batches} batches, "
                                 f"{len(processed_ids)}/{len(video_ids_to_fetch)} videos, "
                                 f"quota: {quota.remaining()} remaining")
@@ -629,8 +648,8 @@ def fetch_channel_data(
                             for video in existing_videos:
                                 all_stats_to_insert.append((video["video_id"], video["statistics"]))
                             
-                            # Progress every 10 batches or at end
-                            if batch_num % 10 == 0 or batch_num == total_batches:
+                            # Progress every N batches or at end
+                            if batch_num % PROGRESS_LOG_INTERVAL == 0 or batch_num == total_batches:
                                 log.info(f"Stats progress: {batch_num}/{total_batches} batches, "
                                         f"{len(all_stats_to_insert)} videos fetched")
                                 
@@ -759,7 +778,17 @@ def fetch_channel_data(
 
 
 def _video_is_recent(video: dict, cutoff_date: datetime) -> bool:
-    """Check if video was published after cutoff date."""
+    """
+    Check if video was published after the cutoff date.
+
+    Args:
+        video: Video dictionary containing 'published_at' field
+        cutoff_date: Timezone-aware datetime representing the oldest allowed date
+
+    Returns:
+        True if video is recent (published after cutoff) or if date cannot be determined,
+        False if video was published before the cutoff date
+    """
     published = video.get('published_at')
     if not published:
         return True  # Keep if no date
@@ -911,7 +940,7 @@ def main():
         "--max-replies",
         type=int,
         default=10,
-        help="Maximum replies per comment (default: 10, prevents blowup on viral comments)"
+        help="Maximum replies per comment (default: 10) - NOTE: not yet implemented"
     )
     parser.add_argument(
         "--max-comment-videos",

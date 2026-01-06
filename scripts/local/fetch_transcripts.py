@@ -75,6 +75,7 @@ except ImportError:
 DEFAULT_DELAY = 1.0  # seconds between requests
 MAX_RETRIES = 3
 RETRY_DELAY = 5.0  # seconds before retry
+PROGRESS_LOG_INTERVAL = 50  # Log progress every N videos
 
 # Singleton API instance
 _api_instance = None
@@ -509,8 +510,8 @@ Examples:
         if i < len(videos_to_process) - 1:
             time.sleep(args.delay)
         
-        # Progress update every 50 videos
-        if (i + 1) % 50 == 0:
+        # Progress update every N videos
+        if (i + 1) % PROGRESS_LOG_INTERVAL == 0:
             elapsed = time.time() - start_time
             rate = (i + 1) / elapsed * 60  # videos per minute
             remaining = (stats["total"] - i - 1) / rate if rate > 0 else 0
