@@ -341,6 +341,12 @@ def init_database(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_video ON comments(video_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_published ON comments(published_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_channel_stats_fetched ON channel_stats(fetched_at)")
+
+    # Composite indexes for common query patterns
+    # Optimizes queries like "get videos from channel X after date Y"
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_channel_published ON videos(channel_id, published_at)")
+    # Optimizes queries like "get comments on video X after date Y"
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_video_published ON comments(video_id, published_at)")
     
     conn.commit()
 
@@ -947,14 +953,12 @@ def insert_comments(conn, comments: list[dict]) -> int:
     """Insert comments, skip duplicates. Returns count of new comments."""
     if not comments:
         return 0
-    
+
     now = datetime.now().isoformat()
-    
-    # Get count before insert to calculate new comments
-    before_count = conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
-    
+
     # Batch insert with INSERT OR IGNORE (skips duplicates via PRIMARY KEY)
-    conn.executemany("""
+    # Use cursor.rowcount to get inserted count without expensive table scans
+    cursor = conn.executemany("""
         INSERT OR IGNORE INTO comments (
             comment_id, video_id, parent_comment_id, author_display_name,
             author_channel_id, text, like_count, published_at, updated_at, fetched_at
@@ -966,12 +970,11 @@ def insert_comments(conn, comments: list[dict]) -> int:
          c.get('updated_at'), now)
         for c in comments
     ])
-    
+
     conn.commit()
-    
-    # Calculate how many were actually inserted
-    after_count = conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
-    return after_count - before_count
+
+    # rowcount returns number of rows actually inserted (ignored duplicates not counted)
+    return cursor.rowcount
 
 
 def upsert_playlist(conn, playlist: dict) -> None:
