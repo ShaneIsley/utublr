@@ -18,13 +18,9 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Optional, Callable, Any
 
-# Try to import logger, fall back to print if not available
-try:
-    from logger import get_logger
-    log = get_logger("database")
-except ImportError:
-    import logging
-    log = logging.getLogger("database")
+from logger import get_logger
+
+log = get_logger(__name__)
 
 
 # ============================================================================
@@ -1073,12 +1069,26 @@ def get_progress(conn, channel_id: str, fetch_id: int, operation: str) -> Option
     return None
 
 
-def save_progress(conn, channel_id: str, fetch_id: int, operation: str, 
+# Threshold for logging slow checkpoint serialization (in milliseconds)
+CHECKPOINT_SLOW_THRESHOLD_MS = 100
+
+
+def save_progress(conn, channel_id: str, fetch_id: int, operation: str,
                   processed_ids: set, total_count: int) -> None:
     """Save progress for a resumable operation."""
     now = datetime.now().isoformat()
+
+    # Monitor JSON serialization performance for large ID sets
+    start = time.perf_counter()
     processed_json = json.dumps(list(processed_ids))
-    
+    serialize_ms = (time.perf_counter() - start) * 1000
+
+    if serialize_ms > CHECKPOINT_SLOW_THRESHOLD_MS:
+        log.warning(
+            f"Slow checkpoint serialization: {len(processed_ids)} IDs took "
+            f"{serialize_ms:.1f}ms for {operation} on channel {channel_id}"
+        )
+
     conn.execute("""
         INSERT INTO fetch_progress (channel_id, fetch_id, operation, processed_ids, total_count, last_updated)
         VALUES (?, ?, ?, ?, ?, ?)
