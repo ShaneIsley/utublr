@@ -433,26 +433,6 @@ def get_existing_video_ids(conn, channel_id: str) -> set[str]:
     return {row[0] for row in result}
 
 
-def get_videos_needing_stats_update(conn, channel_id: str, hours_since_last: int = 6) -> list[str]:
-    """
-    Get video IDs that need stats updated.
-    Only returns videos that haven't been updated in the last N hours.
-    """
-    result = conn.execute("""
-        SELECT v.video_id 
-        FROM videos v
-        LEFT JOIN (
-            SELECT video_id, MAX(fetched_at) as last_fetch
-            FROM video_stats
-            GROUP BY video_id
-        ) vs ON v.video_id = vs.video_id
-        WHERE v.channel_id = ?
-        AND (vs.last_fetch IS NULL 
-             OR datetime(vs.last_fetch) < datetime('now', '-' || ? || ' hours'))
-    """, (channel_id, hours_since_last,)).fetchall()
-    return [row[0] for row in result]
-
-
 def get_videos_without_transcripts(conn, channel_id: str) -> list[str]:
     """Get video IDs that don't have transcripts yet."""
     result = conn.execute("""
@@ -478,9 +458,7 @@ def get_latest_comment_time(conn, video_id: str) -> Optional[datetime]:
 def get_videos_needing_comments(
     conn, 
     channel_id: str, 
-    hours_since_last: int = 24,
-    hours_since_last_new: int = 6,
-    new_video_days: int = 7,
+    refresh_tiers: list[dict] = None,
     limit: int = None
 ) -> list[str]:
     """
@@ -489,102 +467,205 @@ def get_videos_needing_comments(
     Smart detection: Only fetches comments when YouTube's comment_count 
     is higher than the number of comments we have stored.
     
-    Uses tiered update frequency for videos we haven't checked recently:
-    - New videos (< new_video_days old): check every hours_since_last_new hours
-    - Older videos: check every hours_since_last hours
+    Uses tiered refresh periods based on video age.
     
     Args:
         channel_id: Channel to check
-        hours_since_last: Hours before re-checking comments for older videos (default: 24)
-        hours_since_last_new: Hours before re-checking for new videos (default: 6)
-        new_video_days: Videos younger than this many days are "new" (default: 7)
+        refresh_tiers: List of dicts with 'max_age_days' and 'refresh_hours'.
+                      Tiers are processed in order, videos match first applicable tier.
+                      Default: [
+                          {'max_age_days': 2, 'refresh_hours': 6},      # < 48h: every 6h
+                          {'max_age_days': 7, 'refresh_hours': 12},     # 48h-7d: every 12h
+                          {'max_age_days': 30, 'refresh_hours': 48},    # 7d-30d: every 48h
+                          {'max_age_days': None, 'refresh_hours': 168}  # 30d+: every 7 days
+                      ]
         limit: Maximum total videos to return (default: None = unlimited)
     
     Returns:
         List of video IDs needing comment updates, newest first
     """
-    # Get new videos (published within new_video_days) that have more comments than we've stored
-    # Compare YouTube's reported comment_count (from video_stats) vs our actual stored comments
-    new_videos = conn.execute("""
-        SELECT v.video_id, 
-               COALESCE(vs.comment_count, 0) as youtube_count,
-               COALESCE(stored.stored_count, 0) as stored_count
-        FROM videos v
-        LEFT JOIN (
-            SELECT video_id, comment_count,
-                   ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY fetched_at DESC) as rn
-            FROM video_stats
-        ) vs ON v.video_id = vs.video_id AND vs.rn = 1
-        LEFT JOIN (
-            SELECT video_id, COUNT(*) as stored_count, MAX(fetched_at) as last_fetch
-            FROM comments
-            GROUP BY video_id
-        ) stored ON v.video_id = stored.video_id
-        WHERE v.channel_id = ?
-        AND v.published_at >= datetime('now', '-' || ? || ' days')
-        AND COALESCE(vs.comment_count, 0) > COALESCE(stored.stored_count, 0)
-        AND (
-            -- Never fetched comments, or haven't checked recently
-            stored.last_fetch IS NULL 
-            OR datetime(stored.last_fetch) < datetime('now', '-' || ? || ' hours')
-        )
-        ORDER BY v.published_at DESC
-    """, (channel_id, new_video_days, hours_since_last_new)).fetchall()
+    if refresh_tiers is None:
+        refresh_tiers = [
+            {'max_age_days': 2, 'refresh_hours': 6},      # < 48h: every 6h
+            {'max_age_days': 7, 'refresh_hours': 12},     # 48h-7d: every 12h
+            {'max_age_days': 30, 'refresh_hours': 48},    # 7d-30d: every 48h
+            {'max_age_days': None, 'refresh_hours': 168}  # 30d+: every 7 days
+        ]
     
-    new_ids = [row[0] for row in new_videos]
+    all_video_ids = []
     
-    # Log details for debugging
-    if new_videos:
-        sample = new_videos[:3]
-        for vid, yt_count, stored in sample:
-            log.debug(f"New video {vid}: YouTube says {yt_count} comments, we have {stored}")
+    for i, tier in enumerate(refresh_tiers):
+        max_age = tier.get('max_age_days')
+        refresh_hours = tier.get('refresh_hours', 24)
+        
+        # Determine age bounds for this tier
+        if i == 0:
+            min_age = 0
+        else:
+            min_age = refresh_tiers[i-1].get('max_age_days', 0)
+        
+        # Build the age filter
+        if max_age is None:
+            # Last tier: older than previous tier's max
+            age_filter = f"v.published_at < datetime('now', '-{min_age} days')"
+        elif min_age == 0:
+            # First tier: younger than max_age
+            age_filter = f"v.published_at >= datetime('now', '-{max_age} days')"
+        else:
+            # Middle tier: between min and max age
+            age_filter = f"""v.published_at < datetime('now', '-{min_age} days') 
+                           AND v.published_at >= datetime('now', '-{max_age} days')"""
+        
+        # Calculate remaining limit for this tier
+        tier_limit = None
+        if limit is not None:
+            tier_limit = max(0, limit - len(all_video_ids))
+            if tier_limit == 0:
+                break
+        
+        query = f"""
+            SELECT v.video_id, 
+                   COALESCE(vs.comment_count, 0) as youtube_count,
+                   COALESCE(stored.stored_count, 0) as stored_count
+            FROM videos v
+            LEFT JOIN (
+                SELECT video_id, comment_count,
+                       ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY fetched_at DESC) as rn
+                FROM video_stats
+            ) vs ON v.video_id = vs.video_id AND vs.rn = 1
+            LEFT JOIN (
+                SELECT video_id, COUNT(*) as stored_count, MAX(fetched_at) as last_fetch
+                FROM comments
+                GROUP BY video_id
+            ) stored ON v.video_id = stored.video_id
+            WHERE v.channel_id = ?
+            AND {age_filter}
+            AND COALESCE(vs.comment_count, 0) > COALESCE(stored.stored_count, 0)
+            AND (
+                stored.last_fetch IS NULL 
+                OR datetime(stored.last_fetch) < datetime('now', '-{refresh_hours} hours')
+            )
+            ORDER BY v.published_at DESC
+        """
+        if tier_limit is not None:
+            query += f" LIMIT {tier_limit}"
+        
+        videos = conn.execute(query, (channel_id,)).fetchall()
+        tier_ids = [row[0] for row in videos]
+        
+        tier_desc = f"<{max_age}d" if max_age else f">{min_age}d"
+        log.debug(f"Comments tier {tier_desc} (refresh {refresh_hours}h): {len(tier_ids)} videos")
+        
+        all_video_ids.extend(tier_ids)
     
-    # Calculate how many older videos we can fetch
-    older_limit = None
-    if limit is not None:
-        older_limit = max(0, limit - len(new_ids))
-        if older_limit == 0:
-            log.debug(f"Videos needing comments: {len(new_ids)} new (<{new_video_days}d), "
-                      f"limit reached, skipping older videos")
-            return new_ids[:limit]
-    
-    # Get older videos needing updates (less frequent)
-    older_query = """
-        SELECT v.video_id,
-               COALESCE(vs.comment_count, 0) as youtube_count,
-               COALESCE(stored.stored_count, 0) as stored_count
-        FROM videos v
-        LEFT JOIN (
-            SELECT video_id, comment_count,
-                   ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY fetched_at DESC) as rn
-            FROM video_stats
-        ) vs ON v.video_id = vs.video_id AND vs.rn = 1
-        LEFT JOIN (
-            SELECT video_id, COUNT(*) as stored_count, MAX(fetched_at) as last_fetch
-            FROM comments
-            GROUP BY video_id
-        ) stored ON v.video_id = stored.video_id
-        WHERE v.channel_id = ?
-        AND v.published_at < datetime('now', '-' || ? || ' days')
-        AND COALESCE(vs.comment_count, 0) > COALESCE(stored.stored_count, 0)
-        AND (
-            -- Never fetched comments, or haven't checked recently
-            stored.last_fetch IS NULL 
-            OR datetime(stored.last_fetch) < datetime('now', '-' || ? || ' hours')
-        )
-        ORDER BY v.published_at DESC
+    log.debug(f"Total videos needing comments: {len(all_video_ids)}")
+    return all_video_ids
+
+
+def get_videos_needing_stats_update(
+    conn,
+    channel_id: str,
+    refresh_tiers: list[dict] = None,
+    limit: int = None
+) -> list[str]:
     """
-    if older_limit is not None:
-        older_query += f" LIMIT {older_limit}"
+    Get video IDs that need stats refresh.
     
-    older_videos = conn.execute(older_query, (channel_id, new_video_days, hours_since_last)).fetchall()
-    older_ids = [row[0] for row in older_videos]
+    Uses tiered refresh periods based on video age.
     
-    log.debug(f"Videos needing comments: {len(new_ids)} new (<{new_video_days}d), "
-              f"{len(older_ids)} older (>{new_video_days}d)")
+    Args:
+        channel_id: Channel to check
+        refresh_tiers: List of dicts with 'max_age_days' and 'refresh_hours'.
+                      Default: [
+                          {'max_age_days': 2, 'refresh_hours': 0},      # < 48h: every run
+                          {'max_age_days': 7, 'refresh_hours': 6},      # 48h-7d: every 6h
+                          {'max_age_days': 30, 'refresh_hours': 12},    # 7d-30d: every 12h
+                          {'max_age_days': None, 'refresh_hours': 24}   # 30d+: every 24h
+                      ]
+        limit: Maximum total videos to return (default: None = unlimited)
     
-    # Return new videos first (they're more active), then older
-    return new_ids + older_ids
+    Returns:
+        List of video IDs needing stats update, newest first
+    """
+    if refresh_tiers is None:
+        refresh_tiers = [
+            {'max_age_days': 2, 'refresh_hours': 0},      # < 48h: every run
+            {'max_age_days': 7, 'refresh_hours': 6},      # 48h-7d: every 6h
+            {'max_age_days': 30, 'refresh_hours': 12},    # 7d-30d: every 12h
+            {'max_age_days': None, 'refresh_hours': 24}   # 30d+: every 24h
+        ]
+    
+    all_video_ids = []
+    
+    for i, tier in enumerate(refresh_tiers):
+        max_age = tier.get('max_age_days')
+        refresh_hours = tier.get('refresh_hours', 24)
+        
+        # Determine age bounds for this tier
+        if i == 0:
+            min_age = 0
+        else:
+            min_age = refresh_tiers[i-1].get('max_age_days', 0)
+        
+        # Build the age filter
+        if max_age is None:
+            age_filter = f"v.published_at < datetime('now', '-{min_age} days')"
+        elif min_age == 0:
+            age_filter = f"v.published_at >= datetime('now', '-{max_age} days')"
+        else:
+            age_filter = f"""v.published_at < datetime('now', '-{min_age} days') 
+                           AND v.published_at >= datetime('now', '-{max_age} days')"""
+        
+        # Calculate remaining limit
+        tier_limit = None
+        if limit is not None:
+            tier_limit = max(0, limit - len(all_video_ids))
+            if tier_limit == 0:
+                break
+        
+        query = f"""
+            SELECT v.video_id
+            FROM videos v
+            LEFT JOIN (
+                SELECT video_id, MAX(fetched_at) as last_fetch
+                FROM video_stats
+                GROUP BY video_id
+            ) vs ON v.video_id = vs.video_id
+            WHERE v.channel_id = ?
+            AND {age_filter}
+            AND (
+                vs.last_fetch IS NULL
+                OR datetime(vs.last_fetch) < datetime('now', '-{refresh_hours} hours')
+            )
+            ORDER BY v.published_at DESC
+        """
+        if tier_limit is not None:
+            query += f" LIMIT {tier_limit}"
+        
+        videos = conn.execute(query, (channel_id,)).fetchall()
+        tier_ids = [row[0] for row in videos]
+        
+        tier_desc = f"<{max_age}d" if max_age else f">{min_age}d"
+        log.debug(f"Stats tier {tier_desc} (refresh {refresh_hours}h): {len(tier_ids)} videos")
+        
+        all_video_ids.extend(tier_ids)
+    
+    log.debug(f"Total videos needing stats update: {len(all_video_ids)}")
+    return all_video_ids
+
+
+def should_update_playlists(conn, channel_id: str, hours: int = 24) -> bool:
+    """Check if playlists should be updated (not updated in last N hours)."""
+    result = conn.execute("""
+        SELECT MAX(updated_at) FROM playlists WHERE channel_id = ?
+    """, (channel_id,)).fetchone()
+    
+    if not result or not result[0]:
+        return True
+    
+    last_update = datetime.fromisoformat(result[0])
+    hours_ago = datetime.now() - last_update
+    return hours_ago.total_seconds() > (hours * 3600)
 
 
 def should_update_channel_stats(conn, channel_id: str, hours: int = 6) -> bool:
