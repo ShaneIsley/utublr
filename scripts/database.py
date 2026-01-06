@@ -925,37 +925,33 @@ def insert_transcript(conn, video_id: str, transcript: dict) -> bool:
 
 def insert_comments(conn, comments: list[dict]) -> int:
     """Insert comments, skip duplicates. Returns count of new comments."""
-    now = datetime.now().isoformat()
-    new_count = 0
+    if not comments:
+        return 0
     
-    for comment in comments:
-        # Check if exists
-        existing = conn.execute(
-            "SELECT 1 FROM comments WHERE comment_id = ?", (comment['comment_id'],)
-        ).fetchone()
-        
-        if not existing:
-            conn.execute("""
-                INSERT INTO comments (
-                    comment_id, video_id, parent_comment_id, author_display_name,
-                    author_channel_id, text, like_count, published_at, updated_at, fetched_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                comment['comment_id'],
-                comment['video_id'],
-                comment.get('parent_comment_id'),
-                comment.get('author_display_name'),
-                comment.get('author_channel_id'),
-                comment.get('text'),
-                comment.get('like_count', 0),
-                comment.get('published_at'),
-                comment.get('updated_at'),
-                now
-            ))
-            new_count += 1
+    now = datetime.now().isoformat()
+    
+    # Get count before insert to calculate new comments
+    before_count = conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
+    
+    # Batch insert with INSERT OR IGNORE (skips duplicates via PRIMARY KEY)
+    conn.executemany("""
+        INSERT OR IGNORE INTO comments (
+            comment_id, video_id, parent_comment_id, author_display_name,
+            author_channel_id, text, like_count, published_at, updated_at, fetched_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, [
+        (c['comment_id'], c['video_id'], c.get('parent_comment_id'),
+         c.get('author_display_name'), c.get('author_channel_id'),
+         c.get('text'), c.get('like_count', 0), c.get('published_at'),
+         c.get('updated_at'), now)
+        for c in comments
+    ])
     
     conn.commit()
-    return new_count
+    
+    # Calculate how many were actually inserted
+    after_count = conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
+    return after_count - before_count
 
 
 def upsert_playlist(conn, playlist: dict) -> None:
