@@ -14,7 +14,7 @@ Features:
 import json
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Optional, Callable, Any
 
@@ -654,17 +654,37 @@ def get_videos_needing_stats_update(
     return all_video_ids
 
 
+def _parse_datetime_utc(dt_string: str) -> datetime:
+    """
+    Parse a datetime string to a timezone-aware UTC datetime.
+
+    Handles both timezone-naive and timezone-aware strings from the database.
+    This prevents TypeError when comparing with datetime.now(timezone.utc).
+
+    Args:
+        dt_string: ISO format datetime string (may or may not have timezone)
+
+    Returns:
+        Timezone-aware datetime in UTC
+    """
+    dt = datetime.fromisoformat(dt_string.replace('Z', '+00:00'))
+    if dt.tzinfo is None:
+        # Assume UTC for naive datetimes from database
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def should_update_playlists(conn, channel_id: str, hours: int = 24) -> bool:
     """Check if playlists should be updated (not updated in last N hours)."""
     result = conn.execute("""
         SELECT MAX(updated_at) FROM playlists WHERE channel_id = ?
     """, (channel_id,)).fetchone()
-    
+
     if not result or not result[0]:
         return True
-    
-    last_update = datetime.fromisoformat(result[0])
-    hours_ago = datetime.now() - last_update
+
+    last_update = _parse_datetime_utc(result[0])
+    hours_ago = datetime.now(timezone.utc) - last_update
     return hours_ago.total_seconds() > (hours * 3600)
 
 
@@ -677,8 +697,8 @@ def should_update_channel_stats(conn, channel_id: str, hours: int = 6) -> bool:
     if not result or not result[0]:
         return True
     
-    last_fetch = datetime.fromisoformat(result[0])
-    hours_ago = datetime.now() - last_fetch
+    last_fetch = _parse_datetime_utc(result[0])
+    hours_ago = datetime.now(timezone.utc) - last_fetch
     return hours_ago.total_seconds() > (hours * 3600)
 
 

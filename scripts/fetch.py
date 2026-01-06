@@ -96,23 +96,25 @@ def fetch_comments_parallel(
     max_comments_per_video: int,
     backfill: bool,
     num_workers: int = DEFAULT_COMMENT_WORKERS,
+    max_replies_per_comment: int = 10,
     progress_callback: Optional[Callable[[int, int, int], None]] = None,
 ) -> tuple[int, int, list[str]]:
     """
     Fetch comments for multiple videos in parallel.
-    
+
     Creates a separate API client per thread to avoid SSL/connection issues.
-    
+
     Args:
         api_key: YouTube API key (each thread creates its own client)
         conn: Database connection
-        quota: QuotaTracker instance  
+        quota: QuotaTracker instance
         video_ids: List of video IDs to fetch comments for
         max_comments_per_video: Max comments per video
         backfill: If True, fetch all comments; otherwise only new ones
         num_workers: Number of parallel workers (default: 3)
+        max_replies_per_comment: Max replies per top-level comment (default: 10)
         progress_callback: Optional callback(processed, total, new_comments)
-        
+
     Returns:
         Tuple of (total_comments, new_comments, errors)
     """
@@ -155,7 +157,8 @@ def fetch_comments_parallel(
             comments = fetcher.fetch_comments(
                 video_id,
                 since=since,
-                max_results=max_comments_per_video
+                max_results=max_comments_per_video,
+                max_replies_per_comment=max_replies_per_comment
             )
             quota_used = (len(comments) // 100) + 1 if comments else 1
             return video_id, comments, quota_used, None
@@ -412,12 +415,13 @@ def fetch_channel_data(
                         max_comments_per_video=max_comments_per_video,
                         backfill=backfill,
                         num_workers=workers,
+                        max_replies_per_comment=max_replies_per_comment,
                         progress_callback=progress_callback,
                     )
-                    
+
                     stats["comments_fetched"] += total_fetched
                     stats["errors"].extend(comment_errors)
-                    
+
                     log.info(f"Fetched {total_fetched} comments ({total_new} new)")
                 else:
                     log.info("No videos need comment updates")
@@ -718,15 +722,16 @@ def fetch_channel_data(
                         max_comments_per_video=max_comments_per_video,
                         backfill=backfill,
                         num_workers=workers,
+                        max_replies_per_comment=max_replies_per_comment,
                         progress_callback=progress_callback,
                     )
-                    
+
                     stats["comments_fetched"] += total_fetched
                     stats["errors"].extend(comment_errors)
-                    
+
                     log.info(f"Fetched {total_fetched} comments ({total_new} new)")
             else:
-                log.debug(f"All video comments up-to-date")
+                log.debug("All video comments up-to-date")
         
         # ================================================================
         # CLEANUP & COMPLETION
@@ -940,7 +945,7 @@ def main():
         "--max-replies",
         type=int,
         default=10,
-        help="Maximum replies per comment (default: 10) - NOTE: not yet implemented"
+        help="Maximum replies per top-level comment (default: 10, prevents blowup on viral comments)"
     )
     parser.add_argument(
         "--max-comment-videos",
