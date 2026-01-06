@@ -25,10 +25,14 @@ channels:
   - "@trychroma"
   - "@YannicKilcher"
   - "@code4AI"
-  - "@bulwarkmedia"
-  - "@mojo_monday_gpu"
-  - "@podsaveamerica"
   - "@GithubAwesome"
+  - "@SebastianLague"
+  - "@mojo_monday_gpu"
+  - "@bashbunni"
+  - "@AndyMath"
+  - "@ChrisWilsonVideos"
+  - "@podsaveamerica"
+  - "@bulwarkmedia"
   
   # Detailed format with options
   # - identifier: "@mkbhd"
