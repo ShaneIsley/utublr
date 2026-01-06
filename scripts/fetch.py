@@ -23,7 +23,7 @@ import sys
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -549,7 +549,6 @@ def fetch_channel_data(
                         
                         # Filter by age if specified
                         if max_video_age_days:
-                            from datetime import timezone
                             cutoff_date = datetime.now(timezone.utc) - timedelta(days=max_video_age_days)
                             videos = [v for v in videos if _video_is_recent(v, cutoff_date)]
                         
@@ -766,7 +765,6 @@ def _video_is_recent(video: dict, cutoff_date: datetime) -> bool:
         return True  # Keep if no date
     try:
         if isinstance(published, str):
-            from datetime import timezone
             pub_date = datetime.fromisoformat(published.replace('Z', '+00:00'))
         else:
             pub_date = published

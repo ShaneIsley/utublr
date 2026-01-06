@@ -12,6 +12,7 @@ import os
 from datetime import datetime, date
 from typing import Optional
 
+from database import get_quota_usage, save_quota_usage
 from logger import get_logger
 
 log = get_logger("quota")
@@ -81,9 +82,8 @@ class QuotaTracker:
         if not self.conn:
             log.debug("No database connection, quota state won't persist")
             return
-            
+
         try:
-            from database import get_quota_usage
             state = get_quota_usage(self.conn, self.today)
             
             if state:
@@ -99,9 +99,8 @@ class QuotaTracker:
         """Persist quota state to database."""
         if not self.conn:
             return
-            
+
         try:
-            from database import save_quota_usage
             save_quota_usage(self.conn, self.today, self.used, self.operations)
             log.debug(f"Saved quota state to database: {self.used} used")
         except Exception as e:

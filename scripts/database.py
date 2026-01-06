@@ -14,7 +14,7 @@ Features:
 import json
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 from typing import Optional, Callable, Any
 
@@ -1158,7 +1158,3 @@ def purge_deleted_videos(conn, channel_id: str = None, older_than_days: int = 30
     
     conn.commit()
     return len(video_ids)
-
-
-# Need timedelta for purge function
-from datetime import timedelta

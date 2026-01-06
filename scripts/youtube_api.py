@@ -445,9 +445,7 @@ class YouTubeFetcher:
         
         log.debug(f"Fetched metadata for {len(all_videos)} videos")
         return all_videos
-        
-        return all_videos
-    
+
     def _parse_video(self, item: dict) -> dict:
         """Parse video API response into our schema."""
         snippet = item.get("snippet", {})
