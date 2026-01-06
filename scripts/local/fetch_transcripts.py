@@ -326,6 +326,20 @@ def get_videos_needing_transcripts(conn, channel_id: str = None, limit: int = No
     return [{"video_id": row[0], "title": row[1], "channel": row[2]} for row in result]
 
 
+def _escape_like_pattern(value: str) -> str:
+    """
+    Escape special LIKE pattern characters in a string.
+
+    Args:
+        value: User input to escape
+
+    Returns:
+        Escaped string safe for use in LIKE patterns
+    """
+    # Escape special LIKE characters: % _ and the escape char itself
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def resolve_channel_id(conn, identifier: str) -> Optional[str]:
     """
     Resolve a channel identifier to a channel ID.
@@ -338,16 +352,17 @@ def resolve_channel_id(conn, identifier: str) -> Optional[str]:
     ).fetchone()
     if result:
         return result[0]
-    
+
     # Try handle lookup (stored in custom_url typically)
-    handle = identifier.lstrip("@")
+    # Security: Escape LIKE wildcards to prevent pattern injection
+    handle = _escape_like_pattern(identifier.lstrip("@"))
     result = conn.execute(
-        "SELECT channel_id FROM channels WHERE custom_url LIKE ? OR title LIKE ?",
+        "SELECT channel_id FROM channels WHERE custom_url LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\'",
         (f"%{handle}%", f"%{handle}%")
     ).fetchone()
     if result:
         return result[0]
-    
+
     return None
 
 

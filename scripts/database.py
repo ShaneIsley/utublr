@@ -983,31 +983,45 @@ def upsert_playlist(conn, playlist: dict) -> None:
     conn.commit()
 
 
+# Allowed tables for export (security: prevents SQL injection via table names)
+ALLOWED_EXPORT_TABLES = frozenset([
+    'channels', 'channel_stats', 'videos', 'video_stats',
+    'chapters', 'transcripts', 'comments', 'playlists'
+])
+
+
 def export_to_csv(conn, output_dir: str = "exports") -> dict[str, str]:
-    """Export tables to CSV files."""
+    """
+    Export tables to CSV files.
+
+    Only exports from a predefined allowlist of tables for security.
+    """
     import csv
     os.makedirs(output_dir, exist_ok=True)
-    
-    tables = ['channels', 'channel_stats', 'videos', 'video_stats', 
-              'chapters', 'transcripts', 'comments', 'playlists']
-    
+
     exported = {}
-    for table in tables:
+    for table in ALLOWED_EXPORT_TABLES:
+        # Security: Validate table name is in allowlist (defensive check)
+        if table not in ALLOWED_EXPORT_TABLES:
+            log.warning(f"Skipping unauthorized table: {table}")
+            continue
+
         output_path = f"{output_dir}/{table}.csv"
+        # Table name is validated above, safe to use in query
         result = conn.execute(f"SELECT * FROM {table}").fetchall()
-        
+
         if result:
             # Get column names
             cursor = conn.execute(f"SELECT * FROM {table} LIMIT 0")
             columns = [desc[0] for desc in cursor.description]
-            
+
             with open(output_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow(columns)
                 writer.writerows(result)
-        
+
         exported[table] = output_path
-    
+
     return exported
 
 
