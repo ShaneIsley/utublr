@@ -404,7 +404,15 @@ def fetch_channel_data(
                     log.info("No videos need comment updates")
             
             # Update fetch log and return early
-            complete_fetch_log(conn, fetch_id, stats)
+            error_str = "; ".join(stats["errors"][:10]) if stats["errors"] else None
+            complete_fetch_log(
+                conn, fetch_id,
+                videos=stats["videos_fetched"],
+                comments=stats["comments_fetched"],
+                transcripts=stats["transcripts_fetched"],
+                status="completed",
+                errors=error_str
+            )
             return stats
         
         # ================================================================
