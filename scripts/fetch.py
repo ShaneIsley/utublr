@@ -922,7 +922,7 @@ def main():
              "search (100 units/call, stops at known), playlist (1 unit/50 videos, fetches all)"
     )
     parser.add_argument(
-        "--batch-size",
+   "--batch-size",
         type=int,
         default=DEFAULT_BATCH_SIZE,
         help=f"Videos to process per batch/commit (default: {DEFAULT_BATCH_SIZE})"
@@ -931,25 +931,7 @@ def main():
         "--stats-update-hours",
         type=int,
         default=6,
-        help="Only update video stats if older than this (default: 6 hours)"
-    )
-    parser.add_argument(
-        "--comments-update-hours",
-        type=int,
-        default=24,
-        help="Hours before re-fetching comments for older videos (default: 24)"
-    )
-    parser.add_argument(
-        "--comments-update-hours-new",
-        type=int,
-        default=6,
-        help="Hours before re-fetching comments for new videos (default: 6)"
-    )
-    parser.add_argument(
-        "--new-video-days",
-        type=int,
-        default=7,
-        help="Videos younger than this many days are 'new' and get more frequent comment updates (default: 7)"
+        help="Only update channel stats if older than this (default: 6 hours)"
     )
     parser.add_argument(
         "--comment-workers",
@@ -1135,9 +1117,6 @@ def main():
                 video_discovery_mode=get_option("video_discovery_mode", args.video_discovery_mode),
                 batch_size=args.batch_size,
                 stats_update_hours=get_option("stats_update_hours", args.stats_update_hours),
-                comments_update_hours=get_option("comments_update_hours", args.comments_update_hours),
-                comments_update_hours_new=get_option("comments_update_hours_new", args.comments_update_hours_new),
-                new_video_days=get_option("new_video_days", args.new_video_days),
                 backfill=args.backfill,
                 start_time=start_time,
                 max_runtime_minutes=args.max_runtime_minutes,
