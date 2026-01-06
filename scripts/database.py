@@ -522,14 +522,11 @@ def get_videos_needing_comments(
         ) stored ON v.video_id = stored.video_id
         WHERE v.channel_id = ?
         AND v.published_at >= datetime('now', '-' || ? || ' days')
+        AND COALESCE(vs.comment_count, 0) > COALESCE(stored.stored_count, 0)
         AND (
-            -- Never fetched comments, or
+            -- Never fetched comments, or haven't checked recently
             stored.last_fetch IS NULL 
-            -- Haven't checked recently AND YouTube shows more comments than we have
-            OR (
-                datetime(stored.last_fetch) < datetime('now', '-' || ? || ' hours')
-                AND COALESCE(vs.comment_count, 0) > COALESCE(stored.stored_count, 0)
-            )
+            OR datetime(stored.last_fetch) < datetime('now', '-' || ? || ' hours')
         )
         ORDER BY v.published_at DESC
     """, (channel_id, new_video_days, hours_since_last_new)).fetchall()
@@ -569,14 +566,11 @@ def get_videos_needing_comments(
         ) stored ON v.video_id = stored.video_id
         WHERE v.channel_id = ?
         AND v.published_at < datetime('now', '-' || ? || ' days')
+        AND COALESCE(vs.comment_count, 0) > COALESCE(stored.stored_count, 0)
         AND (
-            -- Never fetched comments, or
+            -- Never fetched comments, or haven't checked recently
             stored.last_fetch IS NULL 
-            -- Haven't checked recently AND YouTube shows more comments than we have
-            OR (
-                datetime(stored.last_fetch) < datetime('now', '-' || ? || ' hours')
-                AND COALESCE(vs.comment_count, 0) > COALESCE(stored.stored_count, 0)
-            )
+            OR datetime(stored.last_fetch) < datetime('now', '-' || ? || ' hours')
         )
         ORDER BY v.published_at DESC
     """
