@@ -486,37 +486,61 @@ def get_videos_needing_comments(
     """
     Get video IDs that need comment updates.
     
-    Uses tiered update frequency:
-    - New videos (< new_video_days old): update every hours_since_last_new hours
-    - Older videos: update every hours_since_last hours
+    Smart detection: Only fetches comments when YouTube's comment_count 
+    is higher than the number of comments we have stored.
+    
+    Uses tiered update frequency for videos we haven't checked recently:
+    - New videos (< new_video_days old): check every hours_since_last_new hours
+    - Older videos: check every hours_since_last hours
     
     Args:
         channel_id: Channel to check
-        hours_since_last: Hours before re-fetching comments for older videos (default: 24)
-        hours_since_last_new: Hours before re-fetching for new videos (default: 6)
+        hours_since_last: Hours before re-checking comments for older videos (default: 24)
+        hours_since_last_new: Hours before re-checking for new videos (default: 6)
         new_video_days: Videos younger than this many days are "new" (default: 7)
         limit: Maximum total videos to return (default: None = unlimited)
     
     Returns:
         List of video IDs needing comment updates, newest first
     """
-    # Get new videos (published within new_video_days) needing updates
+    # Get new videos (published within new_video_days) that have more comments than we've stored
+    # Compare YouTube's reported comment_count (from video_stats) vs our actual stored comments
     new_videos = conn.execute("""
-        SELECT v.video_id 
+        SELECT v.video_id, 
+               COALESCE(vs.comment_count, 0) as youtube_count,
+               COALESCE(stored.stored_count, 0) as stored_count
         FROM videos v
         LEFT JOIN (
-            SELECT video_id, MAX(fetched_at) as last_fetch
+            SELECT video_id, comment_count,
+                   ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY fetched_at DESC) as rn
+            FROM video_stats
+        ) vs ON v.video_id = vs.video_id AND vs.rn = 1
+        LEFT JOIN (
+            SELECT video_id, COUNT(*) as stored_count, MAX(fetched_at) as last_fetch
             FROM comments
             GROUP BY video_id
-        ) c ON v.video_id = c.video_id
+        ) stored ON v.video_id = stored.video_id
         WHERE v.channel_id = ?
         AND v.published_at >= datetime('now', '-' || ? || ' days')
-        AND (c.last_fetch IS NULL 
-             OR datetime(c.last_fetch) < datetime('now', '-' || ? || ' hours'))
+        AND (
+            -- Never fetched comments, or
+            stored.last_fetch IS NULL 
+            -- Haven't checked recently AND YouTube shows more comments than we have
+            OR (
+                datetime(stored.last_fetch) < datetime('now', '-' || ? || ' hours')
+                AND COALESCE(vs.comment_count, 0) > COALESCE(stored.stored_count, 0)
+            )
+        )
         ORDER BY v.published_at DESC
     """, (channel_id, new_video_days, hours_since_last_new)).fetchall()
     
     new_ids = [row[0] for row in new_videos]
+    
+    # Log details for debugging
+    if new_videos:
+        sample = new_videos[:3]
+        for vid, yt_count, stored in sample:
+            log.debug(f"New video {vid}: YouTube says {yt_count} comments, we have {stored}")
     
     # Calculate how many older videos we can fetch
     older_limit = None
@@ -529,17 +553,31 @@ def get_videos_needing_comments(
     
     # Get older videos needing updates (less frequent)
     older_query = """
-        SELECT v.video_id 
+        SELECT v.video_id,
+               COALESCE(vs.comment_count, 0) as youtube_count,
+               COALESCE(stored.stored_count, 0) as stored_count
         FROM videos v
         LEFT JOIN (
-            SELECT video_id, MAX(fetched_at) as last_fetch
+            SELECT video_id, comment_count,
+                   ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY fetched_at DESC) as rn
+            FROM video_stats
+        ) vs ON v.video_id = vs.video_id AND vs.rn = 1
+        LEFT JOIN (
+            SELECT video_id, COUNT(*) as stored_count, MAX(fetched_at) as last_fetch
             FROM comments
             GROUP BY video_id
-        ) c ON v.video_id = c.video_id
+        ) stored ON v.video_id = stored.video_id
         WHERE v.channel_id = ?
         AND v.published_at < datetime('now', '-' || ? || ' days')
-        AND (c.last_fetch IS NULL 
-             OR datetime(c.last_fetch) < datetime('now', '-' || ? || ' hours'))
+        AND (
+            -- Never fetched comments, or
+            stored.last_fetch IS NULL 
+            -- Haven't checked recently AND YouTube shows more comments than we have
+            OR (
+                datetime(stored.last_fetch) < datetime('now', '-' || ? || ' hours')
+                AND COALESCE(vs.comment_count, 0) > COALESCE(stored.stored_count, 0)
+            )
+        )
         ORDER BY v.published_at DESC
     """
     if older_limit is not None:
