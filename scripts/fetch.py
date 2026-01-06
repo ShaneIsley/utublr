@@ -334,6 +334,58 @@ def fetch_channel_data(
             log.debug(f"Channel stats up-to-date (within {stats_update_hours}h)")
         
         # ================================================================
+        # EARLY EXIT: Skip video discovery if video count unchanged
+        # ================================================================
+        youtube_video_count = channel_data['statistics']['video_count']
+        existing_video_ids = get_existing_video_ids(conn, channel_id)
+        stored_video_count = len(existing_video_ids)
+        
+        # For incremental fetches, skip expensive video discovery if counts match
+        if not backfill and youtube_video_count == stored_video_count and stored_video_count > 0:
+            log.info(f"Video count unchanged ({youtube_video_count}), skipping video discovery")
+            
+            # Still do comments for videos that need them
+            if fetch_comments:
+                videos_for_comments = get_videos_needing_comments(
+                    conn, 
+                    channel_id, 
+                    hours_since_last=comments_update_hours,
+                    hours_since_last_new=comments_update_hours_new,
+                    new_video_days=new_video_days,
+                    limit=max_comment_videos
+                )
+                
+                if videos_for_comments:
+                    workers = comment_workers if comment_workers > 1 else 1
+                    log.info(f"Fetching comments for {len(videos_for_comments)} videos "
+                            f"({workers} worker{'s' if workers > 1 else ''})")
+                    
+                    def progress_callback(processed, total, new_comments):
+                        log.info(f"Comment progress: {processed}/{total} videos, {new_comments} new comments")
+                    
+                    total_fetched, total_new, comment_errors = fetch_comments_parallel(
+                        api_key=fetcher.api_key,
+                        conn=conn,
+                        quota=quota,
+                        video_ids=videos_for_comments,
+                        max_comments_per_video=max_comments_per_video,
+                        backfill=backfill,
+                        num_workers=workers,
+                        progress_callback=progress_callback,
+                    )
+                    
+                    stats["comments_fetched"] += total_fetched
+                    stats["errors"].extend(comment_errors)
+                    
+                    log.info(f"Fetched {total_fetched} comments ({total_new} new)")
+                else:
+                    log.info("No videos need comment updates")
+            
+            # Update fetch log and return early
+            complete_fetch_log(conn, fetch_id, stats)
+            return stats
+        
+        # ================================================================
         # PLAYLISTS
         # ================================================================
         with LogContext(log, "Fetching playlists"):
@@ -346,7 +398,7 @@ def fetch_channel_data(
         # ================================================================
         # VIDEOS - Smart incremental fetching with checkpointing
         # ================================================================
-        existing_video_ids = get_existing_video_ids(conn, channel_id)
+        # existing_video_ids already fetched above for video count comparison
         log.info(f"Existing videos in DB: {len(existing_video_ids)}")
         
         uploads_playlist = channel_data.get("uploads_playlist_id")
