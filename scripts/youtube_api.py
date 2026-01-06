@@ -10,6 +10,7 @@ Features:
 
 import os
 import re
+import ssl
 import sys
 import time
 import xml.etree.ElementTree as ET
@@ -87,12 +88,15 @@ def retry_with_backoff(
                 except (requests.exceptions.ConnectionError,
                         requests.exceptions.Timeout,
                         ConnectionResetError,
-                        TimeoutError) as e:
+                        TimeoutError,
+                        ssl.SSLError,
+                        OSError) as e:
+                    # OSError catches low-level network errors including SSLEOFError
                     last_exception = e
                     if attempt < max_retries:
                         delay = min(base_delay * (exponential_base ** attempt), max_delay)
                         log.warning(f"Connection error, retrying in {delay:.1f}s "
-                                   f"(attempt {attempt + 1}/{max_retries + 1}): {e}")
+                                   f"(attempt {attempt + 1}/{max_retries + 1}): {type(e).__name__}: {e}")
                         time.sleep(delay)
                         continue
                     
