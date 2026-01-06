@@ -46,6 +46,7 @@ from database import (
     get_latest_comment_time,
     get_videos_needing_comments,
     should_update_channel_stats,
+    should_update_playlists,
     start_fetch_log,
     complete_fetch_log,
     upsert_channel,
@@ -218,11 +219,12 @@ def fetch_channel_data(
     max_comments_per_video: int = 500,
     max_replies_per_comment: int = 10,
     max_comment_videos: int = 200,
+    max_stats_videos: int = 500,
     comment_workers: int = DEFAULT_COMMENT_WORKERS,
     stats_update_hours: int = 6,
-    comments_update_hours: int = 24,
-    comments_update_hours_new: int = 6,
-    new_video_days: int = 7,
+    playlists_update_hours: int = 24,
+    comments_refresh_tiers: list[dict] = None,
+    stats_refresh_tiers: list[dict] = None,
     video_discovery_mode: str = "auto",
     batch_size: int = DEFAULT_BATCH_SIZE,
     backfill: bool = False,
@@ -237,7 +239,7 @@ def fetch_channel_data(
     - Quota tracking and early abort
     - Parallel comment fetching for faster processing
     - Time limit awareness
-    - Tiered comment updates (more frequent for new videos)
+    - Tiered refresh rates based on video age
     
     Note: Transcripts are fetched separately via fetch_transcripts.py
     because YouTube blocks requests from cloud/CI environments.
@@ -247,9 +249,14 @@ def fetch_channel_data(
         max_runtime_minutes: Stop if approaching this runtime limit
         max_comments_per_video: Max comment threads per video (default: 500)
         max_comment_videos: Max videos to fetch comments for per run (default: 200)
-        comments_update_hours: Hours between comment re-fetch for older videos (default: 24)
-        comments_update_hours_new: Hours between comment re-fetch for new videos (default: 6)
-        new_video_days: Videos younger than this are "new" (default: 7)
+        max_stats_videos: Max videos to refresh stats for per run (default: 500)
+        playlists_update_hours: Hours between playlist refresh (default: 24)
+        comments_refresh_tiers: List of {'max_age_days': N, 'refresh_hours': M} for comments
+                               Default: [{'max_age_days': 2, 'refresh_hours': 6},
+                                         {'max_age_days': 7, 'refresh_hours': 12},
+                                         {'max_age_days': None, 'refresh_hours': 24}]
+        stats_refresh_tiers: List of {'max_age_days': N, 'refresh_hours': M} for video stats
+                            Default: same as comments_refresh_tiers
         video_discovery_mode: How to discover new videos:
             - "auto": Use search API for incremental, playlist for backfill (default)
             - "search": Always use search API (100 units/call, stops at known videos)
@@ -258,6 +265,23 @@ def fetch_channel_data(
     Returns:
         Dict with counts of fetched items and status.
     """
+    # Default refresh tiers
+    if comments_refresh_tiers is None:
+        comments_refresh_tiers = [
+            {'max_age_days': 2, 'refresh_hours': 6},      # < 48h: every 6h
+            {'max_age_days': 7, 'refresh_hours': 12},     # 48h-7d: every 12h
+            {'max_age_days': 30, 'refresh_hours': 48},    # 7d-30d: every 48h
+            {'max_age_days': None, 'refresh_hours': 168}  # 30d+: every 7 days
+        ]
+    
+    if stats_refresh_tiers is None:
+        stats_refresh_tiers = [
+            {'max_age_days': 2, 'refresh_hours': 0},      # < 48h: every run
+            {'max_age_days': 7, 'refresh_hours': 6},      # 48h-7d: every 6h
+            {'max_age_days': 30, 'refresh_hours': 12},    # 7d-30d: every 12h
+            {'max_age_days': None, 'refresh_hours': 24}   # 30d+: every 24h
+        ]
+    
     start_time = start_time or time.time()
     
     def check_time_budget() -> int:
@@ -349,9 +373,7 @@ def fetch_channel_data(
                 videos_for_comments = get_videos_needing_comments(
                     conn, 
                     channel_id, 
-                    hours_since_last=comments_update_hours,
-                    hours_since_last_new=comments_update_hours_new,
-                    new_video_days=new_video_days,
+                    refresh_tiers=comments_refresh_tiers,
                     limit=max_comment_videos
                 )
                 
@@ -386,14 +408,17 @@ def fetch_channel_data(
             return stats
         
         # ================================================================
-        # PLAYLISTS
+        # PLAYLISTS (throttled)
         # ================================================================
-        with LogContext(log, "Fetching playlists"):
-            playlists = fetcher.fetch_playlists(channel_id)
-            quota.use('playlists.list', (len(playlists) // 50) + 1)
-            for playlist in playlists:
-                upsert_playlist(conn, playlist)
-        log.info(f"Found {len(playlists)} playlists")
+        if backfill or should_update_playlists(conn, channel_id, playlists_update_hours):
+            with LogContext(log, "Fetching playlists"):
+                playlists = fetcher.fetch_playlists(channel_id)
+                quota.use('playlists.list', (len(playlists) // 50) + 1)
+                for playlist in playlists:
+                    upsert_playlist(conn, playlist)
+            log.info(f"Found {len(playlists)} playlists")
+        else:
+            log.debug(f"Playlists up-to-date (within {playlists_update_hours}h)")
         
         # ================================================================
         # VIDEOS - Smart incremental fetching with checkpointing
@@ -563,7 +588,12 @@ def fetch_channel_data(
         # UPDATE STATS FOR EXISTING VIDEOS (incremental only)
         # ================================================================
         if not backfill and existing_video_ids:
-            videos_needing_stats = get_videos_needing_stats_update(conn, channel_id, stats_update_hours)
+            videos_needing_stats = get_videos_needing_stats_update(
+                conn, 
+                channel_id, 
+                refresh_tiers=stats_refresh_tiers,
+                limit=max_stats_videos
+            )
             
             if videos_needing_stats:
                 # YouTube API allows 50 videos per request
@@ -634,9 +664,7 @@ def fetch_channel_data(
                 videos_for_comments = get_videos_needing_comments(
                     conn, 
                     channel_id, 
-                    hours_since_last=comments_update_hours,
-                    hours_since_last_new=comments_update_hours_new,
-                    new_video_days=new_video_days,
+                    refresh_tiers=comments_refresh_tiers,
                     limit=max_comment_videos
                 )
             
@@ -772,7 +800,7 @@ def dry_run_channel(
     # Check existing data
     existing_video_ids = get_existing_video_ids(conn, channel_id)
     videos_without_transcripts = get_videos_without_transcripts(conn, channel_id)
-    videos_needing_comments = get_videos_needing_comments(conn, channel_id, 24) if fetch_comments else []
+    videos_needing_comments = get_videos_needing_comments(conn, channel_id) if fetch_comments else []
     
     log.info(f"")
     log.info(f"CURRENT DATABASE STATE:")
