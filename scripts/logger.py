@@ -8,12 +8,13 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 
 def setup_logging(
     log_dir: str = "logs",
-    log_level: str = None,
-    console_level: str = None
+    log_level: Optional[str] = None,
+    console_level: Optional[str] = None
 ) -> logging.Logger:
     """
     Set up logging with both file and console handlers.
@@ -68,8 +69,9 @@ def setup_logging(
         # Use symlink on Unix, copy reference on Windows
         if os.name != 'nt':
             latest_log.symlink_to(log_file.name)
-    except (OSError, NotImplementedError):
-        pass  # Symlinks might not work everywhere
+    except (OSError, NotImplementedError) as e:
+        # Symlinks might not work everywhere (e.g., some filesystems, Windows)
+        logger.debug(f"Could not create latest.log symlink: {e}")
     
     # Console handler - configurable level
     console_handler = logging.StreamHandler(sys.stdout)
@@ -86,7 +88,7 @@ def setup_logging(
     return logger
 
 
-def get_logger(name: str = None) -> logging.Logger:
+def get_logger(name: Optional[str] = None) -> logging.Logger:
     """Get a child logger for a specific module."""
     base_logger = logging.getLogger("youtube_fetcher")
     if name:

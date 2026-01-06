@@ -282,8 +282,28 @@ REPORTS = {
 }
 
 
-def run_query(conn, query: str) -> list:
-    """Run a SQL query and return results."""
+def run_query(conn, query: str, allow_unsafe: bool = False) -> list:
+    """
+    Run a SQL query and return results.
+
+    Args:
+        conn: Database connection
+        query: SQL query string
+        allow_unsafe: If False, only SELECT queries are allowed (default: False)
+
+    Returns:
+        List of result rows
+
+    Raises:
+        ValueError: If query is not a SELECT and allow_unsafe is False
+    """
+    # Security: Only allow SELECT queries by default to prevent accidental data modification
+    query_upper = query.strip().upper()
+    if not allow_unsafe and not query_upper.startswith("SELECT"):
+        raise ValueError(
+            "Only SELECT queries are allowed for safety. "
+            "Use --unsafe flag to allow other query types."
+        )
     return conn.execute(query).fetchall()
 
 
@@ -362,7 +382,12 @@ def main():
         action="store_true",
         help="List available reports"
     )
-    
+    parser.add_argument(
+        "--unsafe",
+        action="store_true",
+        help="Allow non-SELECT queries (INSERT, UPDATE, DELETE) - use with caution"
+    )
+
     args = parser.parse_args()
     
     if args.list_reports:
@@ -390,15 +415,21 @@ def main():
     
     # Run query
     try:
+        # Preset reports are always safe (SELECT only), custom SQL needs --unsafe for non-SELECT
+        allow_unsafe = args.unsafe if args.sql else True
         headers = get_column_names(conn, query)
-        rows = run_query(conn, query)
-        
+        rows = run_query(conn, query, allow_unsafe=allow_unsafe)
+
         if args.output:
             export_csv(headers, rows, args.output)
         else:
             print_table(headers, rows)
             print(f"\n({len(rows)} rows)")
-            
+
+    except ValueError as e:
+        # Security restriction error
+        print(f"Security error: {e}", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
         print(f"Query error: {e}", file=sys.stderr)
         sys.exit(1)

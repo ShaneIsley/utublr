@@ -28,9 +28,15 @@ log = get_logger("youtube_api")
 
 
 # ============================================================================
-# RETRY LOGIC WITH EXPONENTIAL BACKOFF
+# CONSTANTS
 # ============================================================================
 
+# YouTube API limits
+API_MAX_RESULTS_PER_PAGE = 50  # Maximum items per API request
+SEARCH_PAGINATION_LIMIT = 10  # Max search API pages to prevent runaway pagination
+PROGRESS_LOG_INTERVAL = 10  # Log progress every N pages
+
+# Retry logic with exponential backoff
 RETRYABLE_STATUS_CODES = (429, 500, 502, 503, 504)
 MAX_RETRIES = 3
 BASE_DELAY = 1.0
@@ -283,7 +289,7 @@ class YouTubeFetcher:
         request = self.youtube.playlistItems().list(
             part="contentDetails",
             playlistId=playlist_id,
-            maxResults=50,
+            maxResults=API_MAX_RESULTS_PER_PAGE,
             pageToken=page_token
         )
         return request.execute()
@@ -311,7 +317,7 @@ class YouTubeFetcher:
             if not next_page_token:
                 break
             
-            if page_count % 10 == 0:
+            if page_count % PROGRESS_LOG_INTERVAL == 0:
                 log.debug(f"Playlist fetch progress: {len(video_ids)} videos, page {page_count}")
         
         log.debug(f"Fetched {len(video_ids)} video IDs from playlist in {page_count} pages")
@@ -332,7 +338,7 @@ class YouTubeFetcher:
             "channelId": channel_id,
             "type": "video",
             "order": "date",
-            "maxResults": 50,
+            "maxResults": API_MAX_RESULTS_PER_PAGE,
         }
         
         if published_after:
@@ -408,7 +414,7 @@ class YouTubeFetcher:
                 break
                 
             # Safety limit - don't paginate forever
-            if api_calls >= 10:
+            if api_calls >= SEARCH_PAGINATION_LIMIT:
                 log.warning(f"Search pagination limit reached ({api_calls} calls), stopping")
                 break
         
@@ -429,43 +435,61 @@ class YouTubeFetcher:
         """Fetch detailed metadata for videos (handles batching)."""
         log.debug(f"Fetching metadata for {len(video_ids)} videos")
         all_videos = []
-        
+
         for i in range(0, len(video_ids), 50):
             batch = video_ids[i:i + 50]
             batch_num = i // 50 + 1
             total_batches = (len(video_ids) + 49) // 50
-            
+
             log.debug(f"Fetching video batch {batch_num}/{total_batches} ({len(batch)} videos)")
-            
+
             response = self._fetch_videos_batch(batch)
-            
+
             for item in response.get("items", []):
-                video = self._parse_video(item)
-                all_videos.append(validate_video_data(video))
-        
+                try:
+                    video = self._parse_video(item)
+                    all_videos.append(validate_video_data(video))
+                except (KeyError, TypeError, ValueError) as e:
+                    video_id = item.get("id", "unknown")
+                    log.warning(f"Skipping malformed video data for {video_id}: {e}")
+                    continue
+
         log.debug(f"Fetched metadata for {len(all_videos)} videos")
         return all_videos
-        
-        return all_videos
-    
+
     def _parse_video(self, item: dict) -> dict:
-        """Parse video API response into our schema."""
+        """
+        Parse video API response into our schema.
+
+        Args:
+            item: Raw video item from YouTube API response
+
+        Returns:
+            Parsed video dictionary matching our database schema
+
+        Raises:
+            KeyError: If required 'id' field is missing from item
+        """
+        video_id = item.get("id")
+        if not video_id:
+            raise KeyError("Missing required 'id' field in video item")
+
         snippet = item.get("snippet", {})
         statistics = item.get("statistics", {})
         content_details = item.get("contentDetails", {})
         status = item.get("status", {})
-        
+
         thumbnails = snippet.get("thumbnails", {})
         thumbnail_url = (thumbnails.get("high") or thumbnails.get("default") or {}).get("url")
-        
+
         duration_iso = content_details.get("duration", "")
         duration_seconds = self._parse_duration(duration_iso)
-        
+
         # Parse chapters from description
         chapters = self._parse_chapters(snippet.get("description", ""), duration_seconds)
-        
+
         return {
-            "video_id": item["id"],
+            "video_id": video_id,
             "channel_id": snippet.get("channelId"),
             "title": snippet.get("title"),
             "description": snippet.get("description"),
@@ -496,7 +520,15 @@ class YouTubeFetcher:
         }
     
     def _parse_duration(self, duration: str) -> Optional[int]:
-        """Convert ISO 8601 duration (PT1H2M3S) to seconds."""
+        """
+        Convert ISO 8601 duration to seconds.
+
+        Args:
+            duration: Duration string in ISO 8601 format (e.g., 'PT1H2M3S')
+
+        Returns:
+            Duration in seconds, or None if input is empty or malformed
+        """
         if not duration:
             return None
         match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration)
@@ -506,9 +538,20 @@ class YouTubeFetcher:
         minutes = int(match.group(2) or 0)
         seconds = int(match.group(3) or 0)
         return hours * 3600 + minutes * 60 + seconds
-    
+
     def _parse_chapters(self, description: str, duration_seconds: Optional[int] = None) -> list[dict]:
-        """Extract chapter timestamps from video description."""
+        """
+        Extract chapter timestamps from video description.
+
+        Parses common timestamp formats like '0:00 Introduction' or '1:23:45 - Chapter Title'.
+
+        Args:
+            description: Video description text to parse
+            duration_seconds: Optional video duration for validation
+
+        Returns:
+            List of chapter dicts with 'title', 'start_seconds', and 'end_seconds' keys
+        """
         if not description:
             return []
         
@@ -652,7 +695,7 @@ class YouTubeFetcher:
         request = self.youtube.playlists().list(
             part="snippet,contentDetails,status",
             channelId=channel_id,
-            maxResults=50,
+            maxResults=API_MAX_RESULTS_PER_PAGE,
             pageToken=page_token
         )
         return request.execute()

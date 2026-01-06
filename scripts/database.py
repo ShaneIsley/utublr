@@ -14,17 +14,13 @@ Features:
 import json
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Optional, Callable, Any
 
-# Try to import logger, fall back to print if not available
-try:
-    from logger import get_logger
-    log = get_logger("database")
-except ImportError:
-    import logging
-    log = logging.getLogger("database")
+from logger import get_logger
+
+log = get_logger(__name__)
 
 
 # ============================================================================
@@ -341,6 +337,12 @@ def init_database(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_video ON comments(video_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_published ON comments(published_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_channel_stats_fetched ON channel_stats(fetched_at)")
+
+    # Composite indexes for common query patterns
+    # Optimizes queries like "get videos from channel X after date Y"
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_channel_published ON videos(channel_id, published_at)")
+    # Optimizes queries like "get comments on video X after date Y"
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_video_published ON comments(video_id, published_at)")
     
     conn.commit()
 
@@ -654,17 +656,37 @@ def get_videos_needing_stats_update(
     return all_video_ids
 
 
+def _parse_datetime_utc(dt_string: str) -> datetime:
+    """
+    Parse a datetime string to a timezone-aware UTC datetime.
+
+    Handles both timezone-naive and timezone-aware strings from the database.
+    This prevents TypeError when comparing with datetime.now(timezone.utc).
+
+    Args:
+        dt_string: ISO format datetime string (may or may not have timezone)
+
+    Returns:
+        Timezone-aware datetime in UTC
+    """
+    dt = datetime.fromisoformat(dt_string.replace('Z', '+00:00'))
+    if dt.tzinfo is None:
+        # Assume UTC for naive datetimes from database
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def should_update_playlists(conn, channel_id: str, hours: int = 24) -> bool:
     """Check if playlists should be updated (not updated in last N hours)."""
     result = conn.execute("""
         SELECT MAX(updated_at) FROM playlists WHERE channel_id = ?
     """, (channel_id,)).fetchone()
-    
+
     if not result or not result[0]:
         return True
-    
-    last_update = datetime.fromisoformat(result[0])
-    hours_ago = datetime.now() - last_update
+
+    last_update = _parse_datetime_utc(result[0])
+    hours_ago = datetime.now(timezone.utc) - last_update
     return hours_ago.total_seconds() > (hours * 3600)
 
 
@@ -677,8 +699,8 @@ def should_update_channel_stats(conn, channel_id: str, hours: int = 6) -> bool:
     if not result or not result[0]:
         return True
     
-    last_fetch = datetime.fromisoformat(result[0])
-    hours_ago = datetime.now() - last_fetch
+    last_fetch = _parse_datetime_utc(result[0])
+    hours_ago = datetime.now(timezone.utc) - last_fetch
     return hours_ago.total_seconds() > (hours * 3600)
 
 
@@ -927,14 +949,12 @@ def insert_comments(conn, comments: list[dict]) -> int:
     """Insert comments, skip duplicates. Returns count of new comments."""
     if not comments:
         return 0
-    
+
     now = datetime.now().isoformat()
-    
-    # Get count before insert to calculate new comments
-    before_count = conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
-    
+
     # Batch insert with INSERT OR IGNORE (skips duplicates via PRIMARY KEY)
-    conn.executemany("""
+    # Use cursor.rowcount to get inserted count without expensive table scans
+    cursor = conn.executemany("""
         INSERT OR IGNORE INTO comments (
             comment_id, video_id, parent_comment_id, author_display_name,
             author_channel_id, text, like_count, published_at, updated_at, fetched_at
@@ -946,12 +966,11 @@ def insert_comments(conn, comments: list[dict]) -> int:
          c.get('updated_at'), now)
         for c in comments
     ])
-    
+
     conn.commit()
-    
-    # Calculate how many were actually inserted
-    after_count = conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
-    return after_count - before_count
+
+    # rowcount returns number of rows actually inserted (ignored duplicates not counted)
+    return cursor.rowcount
 
 
 def upsert_playlist(conn, playlist: dict) -> None:
@@ -983,31 +1002,45 @@ def upsert_playlist(conn, playlist: dict) -> None:
     conn.commit()
 
 
+# Allowed tables for export (security: prevents SQL injection via table names)
+ALLOWED_EXPORT_TABLES = frozenset([
+    'channels', 'channel_stats', 'videos', 'video_stats',
+    'chapters', 'transcripts', 'comments', 'playlists'
+])
+
+
 def export_to_csv(conn, output_dir: str = "exports") -> dict[str, str]:
-    """Export tables to CSV files."""
+    """
+    Export tables to CSV files.
+
+    Only exports from a predefined allowlist of tables for security.
+    """
     import csv
     os.makedirs(output_dir, exist_ok=True)
-    
-    tables = ['channels', 'channel_stats', 'videos', 'video_stats', 
-              'chapters', 'transcripts', 'comments', 'playlists']
-    
+
     exported = {}
-    for table in tables:
+    for table in ALLOWED_EXPORT_TABLES:
+        # Security: Validate table name is in allowlist (defensive check)
+        if table not in ALLOWED_EXPORT_TABLES:
+            log.warning(f"Skipping unauthorized table: {table}")
+            continue
+
         output_path = f"{output_dir}/{table}.csv"
+        # Table name is validated above, safe to use in query
         result = conn.execute(f"SELECT * FROM {table}").fetchall()
-        
+
         if result:
             # Get column names
             cursor = conn.execute(f"SELECT * FROM {table} LIMIT 0")
             columns = [desc[0] for desc in cursor.description]
-            
+
             with open(output_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow(columns)
                 writer.writerows(result)
-        
+
         exported[table] = output_path
-    
+
     return exported
 
 
@@ -1036,12 +1069,26 @@ def get_progress(conn, channel_id: str, fetch_id: int, operation: str) -> Option
     return None
 
 
-def save_progress(conn, channel_id: str, fetch_id: int, operation: str, 
+# Threshold for logging slow checkpoint serialization (in milliseconds)
+CHECKPOINT_SLOW_THRESHOLD_MS = 100
+
+
+def save_progress(conn, channel_id: str, fetch_id: int, operation: str,
                   processed_ids: set, total_count: int) -> None:
     """Save progress for a resumable operation."""
     now = datetime.now().isoformat()
+
+    # Monitor JSON serialization performance for large ID sets
+    start = time.perf_counter()
     processed_json = json.dumps(list(processed_ids))
-    
+    serialize_ms = (time.perf_counter() - start) * 1000
+
+    if serialize_ms > CHECKPOINT_SLOW_THRESHOLD_MS:
+        log.warning(
+            f"Slow checkpoint serialization: {len(processed_ids)} IDs took "
+            f"{serialize_ms:.1f}ms for {operation} on channel {channel_id}"
+        )
+
     conn.execute("""
         INSERT INTO fetch_progress (channel_id, fetch_id, operation, processed_ids, total_count, last_updated)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -1158,7 +1205,3 @@ def purge_deleted_videos(conn, channel_id: str = None, older_than_days: int = 30
     
     conn.commit()
     return len(video_ids)
-
-
-# Need timedelta for purge function
-from datetime import timedelta
