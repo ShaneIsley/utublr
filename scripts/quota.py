@@ -85,9 +85,7 @@ class QuotaTracker:
         self._dirty = False  # Has unsaved changes
         self._since_checkpoint = 0  # Quota units since last save
 
-        # Create dedicated database connection for quota persistence
-        self._conn = self._create_connection()
-
+        # Load initial state (creates temporary connection)
         self._load_state()
 
         log.info(f"Quota tracker initialized: limit={self.daily_limit}, used_today={self.used}")
@@ -96,33 +94,31 @@ class QuotaTracker:
         log.debug(f"Thresholds: warn={self.warn_threshold}, abort={self.abort_threshold}, "
                   f"checkpoint={self._checkpoint_threshold}")
 
-    def _create_connection(self):
-        """Create a dedicated database connection for quota tracking."""
+    def _get_connection(self):
+        """
+        Create a fresh database connection for quota operations.
+
+        Creates a new connection each time to avoid thread-safety issues
+        with libsql's C library when multiple threads access the same connection.
+        """
         import libsql_experimental as libsql
 
         url = os.environ.get("TURSO_DATABASE_URL", "file:data/youtube.db")
         auth_token = os.environ.get("TURSO_AUTH_TOKEN", "")
 
-        log.debug(f"Creating dedicated quota connection to: {url[:30]}...")
-
         if url.startswith("libsql://") or url.startswith("https://"):
-            conn = libsql.connect(database=url, auth_token=auth_token)
+            return libsql.connect(database=url, auth_token=auth_token)
         else:
             if url.startswith("file:"):
                 filepath = url[5:]
                 os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
-            conn = libsql.connect(database=url)
+            return libsql.connect(database=url)
 
-        return conn
-    
     def _load_state(self):
         """Load persisted quota state from database."""
-        if not self._conn:
-            log.debug("No database connection, quota state won't persist")
-            return
-
         try:
-            result = self._conn.execute("""
+            conn = self._get_connection()
+            result = conn.execute("""
                 SELECT used, operations FROM quota_usage WHERE date = ?
             """, (self.today,)).fetchone()
 
@@ -136,17 +132,21 @@ class QuotaTracker:
             log.warning(f"Could not load quota state: {e}")
 
     def _save_state(self):
-        """Persist quota state to database. Must be called with _db_lock held."""
-        if not self._conn:
-            return
+        """
+        Persist quota state to database.
 
+        Creates a fresh connection for thread-safety - libsql's C library
+        isn't thread-safe when sharing connections across threads.
+        """
         try:
             # Get current state snapshot (with quota lock)
             with self._lock:
                 used = self.used
                 operations = self.operations.copy()
 
-            self._conn.execute("""
+            # Create fresh connection for this save (thread-safe)
+            conn = self._get_connection()
+            conn.execute("""
                 INSERT INTO quota_usage (date, used, operations, last_updated)
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(date) DO UPDATE SET
@@ -154,7 +154,7 @@ class QuotaTracker:
                     operations = excluded.operations,
                     last_updated = excluded.last_updated
             """, (self.today, used, json.dumps(operations), datetime.now().isoformat()))
-            self._conn.commit()
+            conn.commit()
             log.debug(f"Saved quota state to database: {used} used")
         except Exception as e:
             log.warning(f"Could not save quota state: {e}")
