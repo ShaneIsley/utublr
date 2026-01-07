@@ -1217,7 +1217,9 @@ def main():
             return "error"
 
     # Process channels - parallel or sequential
-    channel_workers = args.channel_workers
+    # Channel workers can be set via CLI or config file (CLI takes precedence)
+    global_settings = config.get("settings", {})
+    channel_workers = args.channel_workers if args.channel_workers != 1 else global_settings.get("channel_workers", 1)
     if channel_workers > 1:
         log.info(f"Processing {len(channels)} channels with {channel_workers} parallel workers")
         with ThreadPoolExecutor(max_workers=channel_workers) as executor:

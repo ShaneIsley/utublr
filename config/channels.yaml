@@ -65,7 +65,11 @@ settings:
   
   # Parallel workers for comment fetching (1=sequential, 3-5 recommended)
   comment_workers: 3
-  
+
+  # Parallel workers for channel processing (1=sequential, 2-3 recommended)
+  # Each worker creates its own DB connection and API client
+  channel_workers: 2
+
   # Video discovery mode:
   # - auto: Use search API for incremental updates, playlist for backfill (default)
   # - search: Always use search API (100 units/call, stops at known videos)
