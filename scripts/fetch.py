@@ -53,9 +53,11 @@ from database import (
     upsert_channel,
     insert_channel_stats,
     upsert_video,
+    upsert_videos_batch,
     insert_video_stats,
     insert_video_stats_batch,
     upsert_chapters,
+    upsert_chapters_batch,
     insert_transcript,
     insert_comments,
     upsert_playlist,
@@ -569,33 +571,36 @@ def fetch_channel_data(
                     with LogContext(log, f"Batch {batch_num}/{num_batches}"):
                         videos = fetcher.fetch_videos(batch_ids)
                         quota.use('videos.list', 1)
-                        
+
                         # Filter by age if specified
                         if max_video_age_days:
                             cutoff_date = datetime.now(timezone.utc) - timedelta(days=max_video_age_days)
                             videos = [v for v in videos if _video_is_recent(v, cutoff_date)]
-                        
+
+                        # Collect chapters for batch insert
+                        chapters_by_video = {}
+
                         for video in videos:
                             video_id = video["video_id"]
-                            
-                            # Batch DB writes - don't commit per row
-                            upsert_video(conn, video, commit=False)
                             all_stats_to_insert.append((video_id, video["statistics"]))
-                            
+
                             if video.get("chapters"):
-                                upsert_chapters(conn, video_id, video["chapters"], commit=False)
-                            
+                                chapters_by_video[video_id] = video["chapters"]
+
                             processed_ids.add(video_id)
                             stats["videos_fetched"] += 1
-                            
+
                             if video_id in new_video_ids:
                                 stats["videos_new"] += 1
-                        
-                        # Commit once per API batch
+
+                        # Batch DB writes - single network round-trip per operation
+                        upsert_videos_batch(conn, videos, commit=False)
+                        if chapters_by_video:
+                            upsert_chapters_batch(conn, chapters_by_video, commit=False)
                         conn.commit()
-                        
+
                         # Checkpoint: save progress
-                        save_progress(conn, channel_id, fetch_id, 'videos', 
+                        save_progress(conn, channel_id, fetch_id, 'videos',
                                      processed_ids, len(video_ids_to_fetch))
                     
                     # Progress every N batches or at end
@@ -980,6 +985,12 @@ def main():
         help=f"Parallel workers for comment fetching (default: {DEFAULT_COMMENT_WORKERS}, use 1 to disable)"
     )
     parser.add_argument(
+        "--channel-workers",
+        type=int,
+        default=1,
+        help="Parallel workers for channel processing (default: 1, use 2-3 for faster runs)"
+    )
+    parser.add_argument(
         "--max-runtime-minutes",
         type=int,
         default=MAX_RUNTIME_MINUTES,
@@ -1107,7 +1118,7 @@ def main():
         
         return
     
-    # Process each channel
+    # Process channels (parallel or sequential)
     total_stats = {
         "channels": 0,
         "channels_skipped": 0,
@@ -1119,32 +1130,47 @@ def main():
         "transcripts": 0,
         "errors": 0
     }
-    
-    for channel_config in channels:
+    stats_lock = threading.Lock()
+    stop_flag = threading.Event()
+
+    def process_single_channel(channel_config):
+        """Process a single channel. Used by both sequential and parallel processing."""
+        nonlocal total_stats
+
         # Check if we should stop
         elapsed_minutes = (time.time() - start_time) / 60
         if elapsed_minutes >= args.max_runtime_minutes - 10:  # 10 min buffer
-            log.warning(f"Approaching time limit ({elapsed_minutes:.1f} min), stopping")
-            break
-        
+            return "timeout"
+
+        if stop_flag.is_set():
+            return "stopped"
+
         if isinstance(channel_config, str):
             identifier = channel_config
             channel_options = {}
         else:
             identifier = channel_config.get("identifier") or channel_config.get("id") or channel_config.get("handle")
             channel_options = channel_config
-        
+
         # Get global settings from config, merge with channel-specific options
         global_settings = config.get("settings", {})
-        
+
         # Channel options override global settings
         def get_option(key, default):
             return channel_options.get(key, global_settings.get(key, default))
-        
+
+        # For parallel processing, create dedicated fetcher and connection per thread
+        if args.channel_workers > 1:
+            thread_fetcher = YouTubeFetcher(api_key)
+            thread_conn = get_connection()
+        else:
+            thread_fetcher = fetcher
+            thread_conn = conn
+
         try:
             stats = fetch_channel_data(
-                fetcher=fetcher,
-                conn=conn,
+                fetcher=thread_fetcher,
+                conn=thread_conn,
                 quota=quota,
                 channel_identifier=identifier,
                 fetch_comments=not args.skip_comments and channel_options.get("fetch_comments", True),
@@ -1161,27 +1187,64 @@ def main():
                 start_time=start_time,
                 max_runtime_minutes=args.max_runtime_minutes,
             )
-            
-            if stats.get("skipped"):
-                total_stats["channels_skipped"] += 1
-            else:
-                total_stats["channels"] += 1
-            
-            total_stats["videos"] += stats["videos_fetched"]
-            total_stats["videos_new"] += stats["videos_new"]
-            total_stats["videos_stats_updated"] += stats.get("videos_stats_updated", 0)
-            total_stats["comments"] += stats["comments_fetched"]
-            total_stats["transcripts"] += stats.get("transcripts_fetched", 0)
-            total_stats["errors"] += len(stats["errors"])
-            
+
+            with stats_lock:
+                if stats.get("skipped"):
+                    total_stats["channels_skipped"] += 1
+                else:
+                    total_stats["channels"] += 1
+
+                total_stats["videos"] += stats["videos_fetched"]
+                total_stats["videos_new"] += stats["videos_new"]
+                total_stats["videos_stats_updated"] += stats.get("videos_stats_updated", 0)
+                total_stats["comments"] += stats["comments_fetched"]
+                total_stats["transcripts"] += stats.get("transcripts_fetched", 0)
+                total_stats["errors"] += len(stats["errors"])
+
+            return "success"
+
         except QuotaExhaustedError:
-            log.error(f"Quota exhausted, stopping all fetches")
-            total_stats["channels_skipped"] += 1
-            break
-            
+            log.error(f"Quota exhausted while processing {identifier}")
+            stop_flag.set()
+            with stats_lock:
+                total_stats["channels_skipped"] += 1
+            return "quota_exhausted"
+
         except Exception as e:
             log.exception(f"Error processing {identifier}: {e}")
-            total_stats["errors"] += 1
+            with stats_lock:
+                total_stats["errors"] += 1
+            return "error"
+
+    # Process channels - parallel or sequential
+    channel_workers = args.channel_workers
+    if channel_workers > 1:
+        log.info(f"Processing {len(channels)} channels with {channel_workers} parallel workers")
+        with ThreadPoolExecutor(max_workers=channel_workers) as executor:
+            futures = {executor.submit(process_single_channel, ch): ch for ch in channels}
+
+            for future in as_completed(futures):
+                result = future.result()
+                if result == "timeout":
+                    log.warning(f"Approaching time limit, stopping new channel processing")
+                    # Cancel remaining futures
+                    for f in futures:
+                        f.cancel()
+                    break
+                elif result == "quota_exhausted":
+                    log.error("Quota exhausted, stopping all channel processing")
+                    for f in futures:
+                        f.cancel()
+                    break
+    else:
+        # Sequential processing (original behavior)
+        for channel_config in channels:
+            result = process_single_channel(channel_config)
+            if result == "timeout":
+                log.warning(f"Approaching time limit, stopping")
+                break
+            elif result == "quota_exhausted":
+                break
     
     # Summary
     elapsed = time.time() - start_time

@@ -5,10 +5,12 @@ YouTube Data API v3 has a daily quota of 10,000 units (default).
 This module tracks usage and prevents exceeding limits.
 
 Quota state is persisted to the database to track usage across runs.
+Thread-safe for parallel channel processing.
 """
 
 import json
 import os
+import threading
 from datetime import datetime, date
 from typing import Optional
 
@@ -69,7 +71,8 @@ class QuotaTracker:
         self.operations = {}  # Track by operation type
         self.session_used = 0  # Just this run
         self.session_start = datetime.now()
-        
+        self._lock = threading.Lock()  # Thread-safety for parallel channel processing
+
         self._load_state()
         
         log.info(f"Quota tracker initialized: limit={self.daily_limit}, used_today={self.used}")
@@ -116,25 +119,28 @@ class QuotaTracker:
     
     def use(self, operation: str, count: int = 1) -> int:
         """
-        Record quota usage for an operation.
-        
+        Record quota usage for an operation. Thread-safe.
+
         Args:
             operation: API operation name (e.g., 'videos.list')
             count: Number of API calls made
-        
+
         Returns:
             Cost in quota units
         """
         cost = self.COSTS.get(operation, 1) * count
-        self.used += cost
-        self.session_used += cost
-        self.operations[operation] = self.operations.get(operation, 0) + cost
-        
-        log.debug(f"Quota: +{cost} for {operation} x{count} (total: {self.used}/{self.daily_limit})")
-        
+
+        with self._lock:
+            self.used += cost
+            self.session_used += cost
+            self.operations[operation] = self.operations.get(operation, 0) + cost
+            current_used = self.used
+
+        log.debug(f"Quota: +{cost} for {operation} x{count} (total: {current_used}/{self.daily_limit})")
+
         self._save_state()
         self._check_thresholds()
-        
+
         return cost
     
     def _check_thresholds(self):
@@ -147,17 +153,20 @@ class QuotaTracker:
             log.warning(f"QUOTA WARNING: {self.used}/{self.daily_limit} ({usage_fraction:.1%})")
     
     def remaining(self) -> int:
-        """Get remaining quota units."""
-        return max(0, self.daily_limit - self.used)
-    
+        """Get remaining quota units. Thread-safe."""
+        with self._lock:
+            return max(0, self.daily_limit - self.used)
+
     def used_fraction(self) -> float:
-        """Get fraction of quota used."""
-        return self.used / self.daily_limit
-    
+        """Get fraction of quota used. Thread-safe."""
+        with self._lock:
+            return self.used / self.daily_limit
+
     def can_afford(self, operation: str, count: int = 1) -> bool:
-        """Check if we can afford an operation without exceeding abort threshold."""
+        """Check if we can afford an operation without exceeding abort threshold. Thread-safe."""
         cost = self.COSTS.get(operation, 1) * count
-        projected = self.used + cost
+        with self._lock:
+            projected = self.used + cost
         return projected <= (self.daily_limit * self.abort_threshold)
     
     def estimate_channel_cost(
