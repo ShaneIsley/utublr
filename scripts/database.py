@@ -121,7 +121,12 @@ class TursoConnection:
     def commit(self):
         """Commit transaction with automatic retry."""
         return self._conn.commit()
-    
+
+    @retry_db_operation()
+    def executemany(self, sql: str, parameters_list: list):
+        """Execute SQL with multiple parameter sets (batch operation)."""
+        return self._conn.executemany(sql, parameters_list)
+
     def __getattr__(self, name):
         """Delegate other attributes to underlying connection."""
         return getattr(self._conn, name)
@@ -458,19 +463,20 @@ def get_latest_comment_time(conn, video_id: str) -> Optional[datetime]:
 
 
 def get_videos_needing_comments(
-    conn, 
-    channel_id: str, 
+    conn,
+    channel_id: str,
     refresh_tiers: list[dict] = None,
     limit: int = None
 ) -> list[str]:
     """
     Get video IDs that need comment updates.
-    
-    Smart detection: Only fetches comments when YouTube's comment_count 
+
+    Smart detection: Only fetches comments when YouTube's comment_count
     is higher than the number of comments we have stored.
-    
+
     Uses tiered refresh periods based on video age.
-    
+    Optimized to use a single query with CASE statements instead of multiple queries.
+
     Args:
         channel_id: Channel to check
         refresh_tiers: List of dicts with 'max_age_days' and 'refresh_hours'.
@@ -482,7 +488,7 @@ def get_videos_needing_comments(
                           {'max_age_days': None, 'refresh_hours': 168}  # 30d+: every 7 days
                       ]
         limit: Maximum total videos to return (default: None = unlimited)
-    
+
     Returns:
         List of video IDs needing comment updates, newest first
     """
@@ -493,75 +499,79 @@ def get_videos_needing_comments(
             {'max_age_days': 30, 'refresh_hours': 48},    # 7d-30d: every 48h
             {'max_age_days': None, 'refresh_hours': 168}  # 30d+: every 7 days
         ]
-    
-    all_video_ids = []
-    
+
+    # Build CASE statement for refresh hours based on video age
+    case_parts = []
     for i, tier in enumerate(refresh_tiers):
         max_age = tier.get('max_age_days')
         refresh_hours = tier.get('refresh_hours', 24)
-        
-        # Determine age bounds for this tier
+
         if i == 0:
             min_age = 0
         else:
-            min_age = refresh_tiers[i-1].get('max_age_days', 0)
-        
-        # Build the age filter
+            min_age = refresh_tiers[i - 1].get('max_age_days', 0)
+
         if max_age is None:
-            # Last tier: older than previous tier's max
-            age_filter = f"v.published_at < datetime('now', '-{min_age} days')"
+            # Last tier
+            case_parts.append(f"WHEN v.published_at < datetime('now', '-{min_age} days') THEN {refresh_hours}")
         elif min_age == 0:
-            # First tier: younger than max_age
-            age_filter = f"v.published_at >= datetime('now', '-{max_age} days')"
+            # First tier
+            case_parts.append(f"WHEN v.published_at >= datetime('now', '-{max_age} days') THEN {refresh_hours}")
         else:
-            # Middle tier: between min and max age
-            age_filter = f"""v.published_at < datetime('now', '-{min_age} days') 
-                           AND v.published_at >= datetime('now', '-{max_age} days')"""
-        
-        # Calculate remaining limit for this tier
-        tier_limit = None
-        if limit is not None:
-            tier_limit = max(0, limit - len(all_video_ids))
-            if tier_limit == 0:
-                break
-        
-        query = f"""
-            SELECT v.video_id, 
-                   COALESCE(vs.comment_count, 0) as youtube_count,
-                   COALESCE(stored.stored_count, 0) as stored_count
-            FROM videos v
-            LEFT JOIN (
-                SELECT video_id, comment_count,
-                       ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY fetched_at DESC) as rn
-                FROM video_stats
-            ) vs ON v.video_id = vs.video_id AND vs.rn = 1
-            LEFT JOIN (
-                SELECT video_id, COUNT(*) as stored_count, MAX(fetched_at) as last_fetch
-                FROM comments
-                GROUP BY video_id
-            ) stored ON v.video_id = stored.video_id
-            WHERE v.channel_id = ?
-            AND {age_filter}
-            AND COALESCE(vs.comment_count, 0) > COALESCE(stored.stored_count, 0)
-            AND (
-                stored.last_fetch IS NULL 
-                OR datetime(stored.last_fetch) < datetime('now', '-{refresh_hours} hours')
+            # Middle tier
+            case_parts.append(
+                f"WHEN v.published_at < datetime('now', '-{min_age} days') "
+                f"AND v.published_at >= datetime('now', '-{max_age} days') THEN {refresh_hours}"
             )
-            ORDER BY v.published_at DESC
-        """
-        if tier_limit is not None:
-            query += f" LIMIT {tier_limit}"
-        
-        videos = conn.execute(query, (channel_id,)).fetchall()
-        tier_ids = [row[0] for row in videos]
-        
-        tier_desc = f"<{max_age}d" if max_age else f">{min_age}d"
-        log.debug(f"Comments tier {tier_desc} (refresh {refresh_hours}h): {len(tier_ids)} videos")
-        
-        all_video_ids.extend(tier_ids)
-    
-    log.debug(f"Total videos needing comments: {len(all_video_ids)}")
-    return all_video_ids
+
+    refresh_hours_case = "CASE " + " ".join(case_parts) + " ELSE 168 END"
+
+    # Single optimized query that handles all tiers at once
+    query = f"""
+        SELECT v.video_id, v.published_at,
+               COALESCE(vs.comment_count, 0) as youtube_count,
+               COALESCE(stored.stored_count, 0) as stored_count,
+               ({refresh_hours_case}) as tier_refresh_hours
+        FROM videos v
+        LEFT JOIN (
+            SELECT video_id, comment_count,
+                   ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY fetched_at DESC) as rn
+            FROM video_stats
+        ) vs ON v.video_id = vs.video_id AND vs.rn = 1
+        LEFT JOIN (
+            SELECT video_id, COUNT(*) as stored_count, MAX(fetched_at) as last_fetch
+            FROM comments
+            GROUP BY video_id
+        ) stored ON v.video_id = stored.video_id
+        WHERE v.channel_id = ?
+        AND COALESCE(vs.comment_count, 0) > COALESCE(stored.stored_count, 0)
+        AND (
+            stored.last_fetch IS NULL
+            OR datetime(stored.last_fetch) < datetime('now', '-' || ({refresh_hours_case}) || ' hours')
+        )
+        ORDER BY v.published_at DESC
+    """
+    if limit is not None:
+        query += f" LIMIT {limit}"
+
+    videos = conn.execute(query, (channel_id,)).fetchall()
+    video_ids = [row[0] for row in videos]
+
+    # Log tier breakdown for debugging
+    tier_counts = {}
+    for row in videos:
+        refresh_h = row[4]
+        tier_counts[refresh_h] = tier_counts.get(refresh_h, 0) + 1
+
+    for tier in refresh_tiers:
+        max_age = tier.get('max_age_days')
+        refresh_hours = tier.get('refresh_hours', 24)
+        count = tier_counts.get(refresh_hours, 0)
+        tier_desc = f"<{max_age}d" if max_age else ">30d"
+        log.debug(f"Comments tier {tier_desc} (refresh {refresh_hours}h): {count} videos")
+
+    log.debug(f"Total videos needing comments: {len(video_ids)}")
+    return video_ids
 
 
 def get_videos_needing_stats_update(
@@ -572,9 +582,10 @@ def get_videos_needing_stats_update(
 ) -> list[str]:
     """
     Get video IDs that need stats refresh.
-    
+
     Uses tiered refresh periods based on video age.
-    
+    Optimized to use a single query with CASE statements instead of multiple queries.
+
     Args:
         channel_id: Channel to check
         refresh_tiers: List of dicts with 'max_age_days' and 'refresh_hours'.
@@ -585,7 +596,7 @@ def get_videos_needing_stats_update(
                           {'max_age_days': None, 'refresh_hours': 24}   # 30d+: every 24h
                       ]
         limit: Maximum total videos to return (default: None = unlimited)
-    
+
     Returns:
         List of video IDs needing stats update, newest first
     """
@@ -596,64 +607,71 @@ def get_videos_needing_stats_update(
             {'max_age_days': 30, 'refresh_hours': 12},    # 7d-30d: every 12h
             {'max_age_days': None, 'refresh_hours': 24}   # 30d+: every 24h
         ]
-    
-    all_video_ids = []
-    
+
+    # Build CASE statement for refresh hours based on video age
+    case_parts = []
     for i, tier in enumerate(refresh_tiers):
         max_age = tier.get('max_age_days')
         refresh_hours = tier.get('refresh_hours', 24)
-        
-        # Determine age bounds for this tier
+
         if i == 0:
             min_age = 0
         else:
-            min_age = refresh_tiers[i-1].get('max_age_days', 0)
-        
-        # Build the age filter
+            min_age = refresh_tiers[i - 1].get('max_age_days', 0)
+
         if max_age is None:
-            age_filter = f"v.published_at < datetime('now', '-{min_age} days')"
+            # Last tier
+            case_parts.append(f"WHEN v.published_at < datetime('now', '-{min_age} days') THEN {refresh_hours}")
         elif min_age == 0:
-            age_filter = f"v.published_at >= datetime('now', '-{max_age} days')"
+            # First tier
+            case_parts.append(f"WHEN v.published_at >= datetime('now', '-{max_age} days') THEN {refresh_hours}")
         else:
-            age_filter = f"""v.published_at < datetime('now', '-{min_age} days') 
-                           AND v.published_at >= datetime('now', '-{max_age} days')"""
-        
-        # Calculate remaining limit
-        tier_limit = None
-        if limit is not None:
-            tier_limit = max(0, limit - len(all_video_ids))
-            if tier_limit == 0:
-                break
-        
-        query = f"""
-            SELECT v.video_id
-            FROM videos v
-            LEFT JOIN (
-                SELECT video_id, MAX(fetched_at) as last_fetch
-                FROM video_stats
-                GROUP BY video_id
-            ) vs ON v.video_id = vs.video_id
-            WHERE v.channel_id = ?
-            AND {age_filter}
-            AND (
-                vs.last_fetch IS NULL
-                OR datetime(vs.last_fetch) < datetime('now', '-{refresh_hours} hours')
+            # Middle tier
+            case_parts.append(
+                f"WHEN v.published_at < datetime('now', '-{min_age} days') "
+                f"AND v.published_at >= datetime('now', '-{max_age} days') THEN {refresh_hours}"
             )
-            ORDER BY v.published_at DESC
-        """
-        if tier_limit is not None:
-            query += f" LIMIT {tier_limit}"
-        
-        videos = conn.execute(query, (channel_id,)).fetchall()
-        tier_ids = [row[0] for row in videos]
-        
-        tier_desc = f"<{max_age}d" if max_age else f">{min_age}d"
-        log.debug(f"Stats tier {tier_desc} (refresh {refresh_hours}h): {len(tier_ids)} videos")
-        
-        all_video_ids.extend(tier_ids)
-    
-    log.debug(f"Total videos needing stats update: {len(all_video_ids)}")
-    return all_video_ids
+
+    refresh_hours_case = "CASE " + " ".join(case_parts) + " ELSE 24 END"
+
+    # Single optimized query that handles all tiers at once
+    query = f"""
+        SELECT v.video_id, v.published_at,
+               ({refresh_hours_case}) as tier_refresh_hours
+        FROM videos v
+        LEFT JOIN (
+            SELECT video_id, MAX(fetched_at) as last_fetch
+            FROM video_stats
+            GROUP BY video_id
+        ) vs ON v.video_id = vs.video_id
+        WHERE v.channel_id = ?
+        AND (
+            vs.last_fetch IS NULL
+            OR datetime(vs.last_fetch) < datetime('now', '-' || ({refresh_hours_case}) || ' hours')
+        )
+        ORDER BY v.published_at DESC
+    """
+    if limit is not None:
+        query += f" LIMIT {limit}"
+
+    videos = conn.execute(query, (channel_id,)).fetchall()
+    video_ids = [row[0] for row in videos]
+
+    # Log tier breakdown for debugging
+    tier_counts = {}
+    for row in videos:
+        refresh_h = row[2]
+        tier_counts[refresh_h] = tier_counts.get(refresh_h, 0) + 1
+
+    for tier in refresh_tiers:
+        max_age = tier.get('max_age_days')
+        refresh_hours = tier.get('refresh_hours', 24)
+        count = tier_counts.get(refresh_hours, 0)
+        tier_desc = f"<{max_age}d" if max_age else ">30d"
+        log.debug(f"Stats tier {tier_desc} (refresh {refresh_hours}h): {count} videos")
+
+    log.debug(f"Total videos needing stats update: {len(video_ids)}")
+    return video_ids
 
 
 def _parse_datetime_utc(dt_string: str) -> datetime:
@@ -868,31 +886,153 @@ def insert_video_stats(conn, video_id: str, stats: dict, commit: bool = True) ->
 
 
 def insert_video_stats_batch(conn, video_stats: list[tuple[str, dict]]) -> int:
-    """Insert multiple video stats in a single transaction.
-    
+    """Insert multiple video stats in a single transaction using executemany.
+
     Args:
         conn: Database connection
         video_stats: List of (video_id, stats_dict) tuples
-        
+
     Returns:
         Number of stats inserted
     """
+    if not video_stats:
+        return 0
+
     now = datetime.now().isoformat()
-    count = 0
-    for video_id, stats in video_stats:
-        conn.execute("""
-            INSERT OR IGNORE INTO video_stats (video_id, fetched_at, view_count, like_count, comment_count)
-            VALUES (?, ?, ?, ?, ?)
-        """, (
+
+    # Prepare all parameters at once
+    params = [
+        (
             video_id,
             now,
             stats.get('view_count', 0),
             stats.get('like_count', 0),
             stats.get('comment_count', 0)
-        ))
-        count += 1
+        )
+        for video_id, stats in video_stats
+    ]
+
+    # Single batch insert
+    conn.executemany("""
+        INSERT OR IGNORE INTO video_stats (video_id, fetched_at, view_count, like_count, comment_count)
+        VALUES (?, ?, ?, ?, ?)
+    """, params)
     conn.commit()
-    return count
+    return len(video_stats)
+
+
+def upsert_videos_batch(conn, videos: list[dict], commit: bool = True) -> int:
+    """Insert or update multiple videos in a single batch operation.
+
+    Args:
+        conn: Database connection
+        videos: List of video dicts with video metadata
+
+    Returns:
+        Number of videos upserted
+    """
+    if not videos:
+        return 0
+
+    now = datetime.now().isoformat()
+
+    # Prepare all parameters at once
+    params = []
+    for video in videos:
+        tags = json.dumps(video.get('tags', []))
+        topic_categories = json.dumps(video.get('topic_categories', []))
+        params.append((
+            video['video_id'],
+            video.get('channel_id'),
+            video.get('title'),
+            video.get('description'),
+            video.get('published_at'),
+            video.get('duration_seconds'),
+            video.get('duration_iso'),
+            video.get('category_id'),
+            video.get('default_language'),
+            video.get('default_audio_language'),
+            tags,
+            video.get('thumbnail_url'),
+            1 if video.get('caption_available') else 0,
+            video.get('definition'),
+            video.get('dimension'),
+            video.get('projection'),
+            video.get('privacy_status'),
+            video.get('license'),
+            1 if video.get('embeddable') else 0,
+            1 if video.get('made_for_kids') else 0,
+            topic_categories,
+            1 if video.get('has_chapters') else 0,
+            now,  # first_seen_at
+            now   # updated_at
+        ))
+
+    # Single batch upsert
+    conn.executemany("""
+        INSERT INTO videos (
+            video_id, channel_id, title, description, published_at,
+            duration_seconds, duration_iso, category_id, default_language,
+            default_audio_language, tags, thumbnail_url, caption_available,
+            definition, dimension, projection, privacy_status, license,
+            embeddable, made_for_kids, topic_categories, has_chapters,
+            first_seen_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(video_id) DO UPDATE SET
+            title = excluded.title,
+            description = excluded.description,
+            tags = excluded.tags,
+            thumbnail_url = excluded.thumbnail_url,
+            caption_available = excluded.caption_available,
+            privacy_status = excluded.privacy_status,
+            has_chapters = excluded.has_chapters,
+            updated_at = excluded.updated_at
+    """, params)
+
+    if commit:
+        conn.commit()
+    return len(videos)
+
+
+def upsert_chapters_batch(conn, chapters_by_video: dict[str, list[dict]], commit: bool = True) -> int:
+    """Replace chapters for multiple videos in batch.
+
+    Args:
+        conn: Database connection
+        chapters_by_video: Dict mapping video_id to list of chapter dicts
+
+    Returns:
+        Total number of chapters inserted
+    """
+    if not chapters_by_video:
+        return 0
+
+    # Delete old chapters for all videos in one query
+    video_ids = list(chapters_by_video.keys())
+    placeholders = ','.join(['?' for _ in video_ids])
+    conn.execute(f"DELETE FROM chapters WHERE video_id IN ({placeholders})", video_ids)
+
+    # Prepare all chapter inserts
+    params = []
+    for video_id, chapters in chapters_by_video.items():
+        for i, chapter in enumerate(chapters):
+            params.append((
+                video_id,
+                i,
+                chapter.get('title'),
+                chapter.get('start_seconds'),
+                chapter.get('end_seconds')
+            ))
+
+    if params:
+        conn.executemany("""
+            INSERT INTO chapters (video_id, chapter_index, title, start_seconds, end_seconds)
+            VALUES (?, ?, ?, ?, ?)
+        """, params)
+
+    if commit:
+        conn.commit()
+    return len(params)
 
 
 def upsert_chapters(conn, video_id: str, chapters: list[dict], commit: bool = True) -> None:
