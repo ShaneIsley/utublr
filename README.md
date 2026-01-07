@@ -277,7 +277,11 @@ quota_usage     -- API quota tracking
 The fetcher supports two database backends:
 
 ### Turso (Default)
-Cloud-hosted SQLite with edge replication. Good for single-worker operations.
+Cloud-hosted SQLite with edge replication. **Only supports sequential processing** (1 channel at a time).
+
+> ⚠️ **Note:** Turso's libsql-experimental native library has thread-safety issues that cause
+> heap corruption when using parallel workers. The fetcher automatically forces `channel_workers=1`
+> when using Turso. Use PostgreSQL if you need parallel channel processing.
 
 ```bash
 export DATABASE_BACKEND=turso  # or omit (default)
@@ -330,16 +334,16 @@ settings:
 ### Thread-Safety Design
 
 **With PostgreSQL (recommended for parallel):**
-PostgreSQL handles concurrent connections natively. No special handling needed.
+PostgreSQL handles concurrent connections natively. Full parallel processing supported.
 
 **With Turso/libsql:**
-The system uses several strategies to work around Turso's stream-based limitations:
+Turso's native library (`libsql-experimental`) has thread-safety issues at the C memory allocator level,
+causing heap corruption when used with multiple threads. **Parallel channel workers are automatically
+disabled** when using Turso. Comment workers within a single channel still work since they share one connection.
 
-1. **Per-worker connections**: Each channel worker creates its own database connection
-2. **Connection refresh**: Automatic reconnection on "stream not found" errors
-3. **Fresh connections for quota saves**: Avoids libsql's C library thread-safety issues
-4. **Separate locks**: Fast state updates vs slower DB operations
-5. **Auto-checkpointing**: Quota state saves every 500 units + at phase transitions
+Turso-specific features:
+- **Connection refresh**: Automatic reconnection on "stream not found" errors
+- **Auto-checkpointing**: Quota state saves every 500 units + at phase transitions
 
 ## API Quota Management
 

@@ -39,6 +39,7 @@ log = get_logger("fetch")
 from database import (
     get_connection,
     init_database,
+    is_postgres,
     get_last_fetch_time,
     get_latest_video_publish_date,
     get_existing_video_ids,
@@ -1250,6 +1251,15 @@ def main():
     # Channel workers can be set via CLI or config file (CLI takes precedence)
     global_settings = config.get("settings", {})
     channel_workers = args.channel_workers if args.channel_workers != 1 else global_settings.get("channel_workers", 1)
+
+    # IMPORTANT: Turso's libsql-experimental native library is NOT thread-safe
+    # Using parallel workers with Turso causes heap corruption ("malloc(): unsorted double linked list corrupted")
+    # Force sequential processing for Turso; PostgreSQL handles parallelization properly
+    if channel_workers > 1 and not is_postgres():
+        log.warning("Turso backend does not support parallel workers (native library thread-safety issue)")
+        log.warning("Forcing sequential processing. Use PostgreSQL backend for parallel channel processing.")
+        channel_workers = 1
+
     if channel_workers > 1:
         log.info(f"Processing {len(channels)} channels with {channel_workers} parallel workers")
         with ThreadPoolExecutor(max_workers=channel_workers) as executor:
