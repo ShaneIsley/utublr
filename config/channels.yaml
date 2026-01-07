@@ -67,9 +67,9 @@ settings:
   comment_workers: 3
 
   # Parallel workers for channel processing (1=sequential, 2-3 for faster runs)
-  # NOTE: Disabled by default due to Turso/libsql connection stream conflicts
   # Each worker creates its own DB connection and API client
-  channel_workers: 1
+  # Quota tracking uses a dedicated connection with auto-checkpointing
+  channel_workers: 2
 
   # Video discovery mode:
   # - auto: Use search API for incremental updates, playlist for backfill (default)

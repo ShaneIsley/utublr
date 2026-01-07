@@ -427,7 +427,10 @@ def fetch_channel_data(
                     log.info(f"Fetched {total_fetched} comments ({total_new} new)")
                 else:
                     log.info("No videos need comment updates")
-            
+
+            # Checkpoint quota before early return
+            quota.flush()
+
             # Update fetch log and return early
             error_str = "; ".join(stats["errors"][:10]) if stats["errors"] else None
             complete_fetch_log(
@@ -618,7 +621,10 @@ def fetch_channel_data(
             # Batch insert all stats at once
             if all_stats_to_insert:
                 insert_video_stats_batch(conn, all_stats_to_insert)
-        
+
+            # Checkpoint quota after video phase
+            quota.flush()
+
         # ================================================================
         # UPDATE STATS FOR EXISTING VIDEOS (incremental only)
         # ================================================================
@@ -672,9 +678,12 @@ def fetch_channel_data(
                         stats["videos_stats_updated"] = insert_video_stats_batch(conn, all_stats_to_insert)
                     
                     log.info(f"Updated stats for {stats['videos_stats_updated']} videos")
+
+                    # Checkpoint quota after stats phase
+                    quota.flush()
                 else:
                     log.debug(f"Insufficient quota for stats update ({num_api_calls} calls needed)")
-        
+
         # ================================================================
         # TRANSCRIPTS - Skipped (run fetch_transcripts.py locally)
         # ================================================================
@@ -735,9 +744,12 @@ def fetch_channel_data(
                     stats["errors"].extend(comment_errors)
 
                     log.info(f"Fetched {total_fetched} comments ({total_new} new)")
+
+                    # Checkpoint quota after comments phase
+                    quota.flush()
             else:
                 log.debug("All video comments up-to-date")
-        
+
         # ================================================================
         # CLEANUP & COMPLETION
         # ================================================================
@@ -757,33 +769,37 @@ def fetch_channel_data(
         )
         
         log.info(f"✅ Completed: {channel_data['title']}")
+        quota.flush()  # Final checkpoint on success
         quota.log_summary()
-        
+
     except QuotaExhaustedError as e:
         log.error(f"Quota exhausted: {e}")
-        complete_fetch_log(conn, fetch_id, 
-                          stats["videos_fetched"], stats["comments_fetched"], 
+        quota.flush()  # Save quota state on error
+        complete_fetch_log(conn, fetch_id,
+                          stats["videos_fetched"], stats["comments_fetched"],
                           stats["transcripts_fetched"],
                           status="quota_exhausted", errors=str(e))
         stats["skipped"] = True
         stats["errors"].append(str(e))
-        
+
     except TimeoutError as e:
         log.error(f"Timeout approaching: {e}")
+        quota.flush()  # Save quota state on timeout
         complete_fetch_log(conn, fetch_id,
                           stats["videos_fetched"], stats["comments_fetched"],
                           stats["transcripts_fetched"],
                           status="timeout", errors=str(e))
         stats["errors"].append(str(e))
-        
+
     except Exception as e:
         log.exception(f"Fetch failed: {e}")
-        complete_fetch_log(conn, fetch_id, 
+        quota.flush()  # Save quota state on failure
+        complete_fetch_log(conn, fetch_id,
                           stats["videos_fetched"], stats["comments_fetched"],
                           stats["transcripts_fetched"],
                           status="failed", errors=str(e))
         raise
-    
+
     return stats
 
 
@@ -1028,8 +1044,8 @@ def main():
     init_database(conn)
     log.info("Database initialized")
     
-    # Initialize quota tracker with database connection for persistence
-    quota = QuotaTracker(daily_limit=args.quota_limit, conn=conn)
+    # Initialize quota tracker (creates its own dedicated connection)
+    quota = QuotaTracker(daily_limit=args.quota_limit)
     
     # Reset quota if requested
     if args.reset_quota:
