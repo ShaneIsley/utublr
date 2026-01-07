@@ -4,12 +4,12 @@ A production-ready system for tracking YouTube channel metadata over time using 
 
 ## Features
 
-- **Multi-channel tracking** - Monitor dozens of channels from a single config file
+- **Multi-channel tracking** - Monitor multiple channels from a single config file
 - **Smart incremental updates** - Only fetches new/changed data to minimize API usage
 - **Turso cloud database** - No more artifact uploads; data persists reliably
 - **Quota tracking** - Monitors API usage across runs, warns before exhaustion
 - **Checkpointing** - Resume interrupted fetches from where they left off
-- **Retry with backoff** - Handles transient API/database errors gracefully
+- **Retry with backoff** - Handles transient API/database errors
 - **Dry-run mode** - Preview what would be fetched without using quota
 - **Deletion detection** - Tracks when videos are removed from channels
 - **Detailed logging** - DEBUG logs to file for troubleshooting
