@@ -13,6 +13,7 @@ Features:
 
 import json
 import os
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -30,7 +31,7 @@ log = get_logger(__name__)
 # Turso-specific error patterns that are retryable
 RETRYABLE_ERROR_PATTERNS = [
     "502 Bad Gateway",
-    "503 Service Unavailable", 
+    "503 Service Unavailable",
     "504 Gateway Timeout",
     "Connection reset",
     "Connection refused",
@@ -39,6 +40,15 @@ RETRYABLE_ERROR_PATTERNS = [
     "Too many requests",
     "SQLITE_BUSY",
     "database is locked",
+    # Turso/Hrana stream errors - require connection refresh
+    "stream not found",
+    "Stream already in use",
+]
+
+# Patterns that indicate the connection needs to be recreated
+CONNECTION_REFRESH_PATTERNS = [
+    "stream not found",
+    "Stream already in use",
 ]
 
 # Retry configuration optimized for Turso free tier
@@ -52,6 +62,15 @@ def is_retryable_error(error: Exception) -> bool:
     """Check if an error is retryable based on known patterns."""
     error_str = str(error).lower()
     for pattern in RETRYABLE_ERROR_PATTERNS:
+        if pattern.lower() in error_str:
+            return True
+    return False
+
+
+def needs_connection_refresh(error: Exception) -> bool:
+    """Check if an error indicates the connection needs to be recreated."""
+    error_str = str(error).lower()
+    for pattern in CONNECTION_REFRESH_PATTERNS:
         if pattern.lower() in error_str:
             return True
     return False
@@ -101,31 +120,90 @@ def retry_db_operation(
 class TursoConnection:
     """
     Wrapper around libsql connection with automatic retry logic.
-    
-    Provides resilient execute() and commit() methods that handle
-    transient Turso errors with exponential backoff.
-    """
-    
-    def __init__(self, conn):
-        self._conn = conn
-        self._in_transaction = False
-    
-    @retry_db_operation()
-    def execute(self, sql: str, parameters: tuple = None):
-        """Execute SQL with automatic retry on transient errors."""
-        if parameters:
-            return self._conn.execute(sql, parameters)
-        return self._conn.execute(sql)
-    
-    @retry_db_operation()
-    def commit(self):
-        """Commit transaction with automatic retry."""
-        return self._conn.commit()
 
-    @retry_db_operation()
+    Provides resilient execute() and commit() methods that handle
+    transient Turso errors with exponential backoff. Automatically
+    refreshes the connection on stream errors.
+    """
+
+    def __init__(self, conn, url: str = None, auth_token: str = None):
+        self._conn = conn
+        self._url = url
+        self._auth_token = auth_token
+        self._in_transaction = False
+        self._lock = threading.Lock()  # Protect connection refresh
+
+    def _refresh_connection(self):
+        """Recreate the underlying connection after stream errors."""
+        if not self._url:
+            log.warning("Cannot refresh connection: no URL stored")
+            return
+
+        import libsql_experimental as libsql
+
+        log.info("Refreshing database connection after stream error")
+        with self._lock:
+            if self._url.startswith("libsql://") or self._url.startswith("https://"):
+                self._conn = libsql.connect(database=self._url, auth_token=self._auth_token)
+            else:
+                self._conn = libsql.connect(database=self._url)
+
+    def _execute_with_refresh(self, method_name: str, *args, **kwargs):
+        """Execute an operation with connection refresh on stream errors.
+
+        IMPORTANT: Takes method_name (string) instead of bound method to ensure
+        we use the NEW connection after refresh, not the old captured one.
+        """
+        last_exception = None
+
+        for attempt in range(DB_MAX_RETRIES + 1):
+            try:
+                # Get fresh method reference from current connection each attempt
+                method = getattr(self._conn, method_name)
+                return method(*args, **kwargs)
+            except Exception as e:
+                if needs_connection_refresh(e):
+                    last_exception = e
+                    if attempt < DB_MAX_RETRIES:
+                        delay = min(DB_BASE_DELAY * (DB_EXPONENTIAL_BASE ** attempt), DB_MAX_DELAY)
+                        log.warning(f"Stream error, refreshing connection in {delay:.1f}s "
+                                   f"(attempt {attempt + 1}/{DB_MAX_RETRIES + 1}): {e}")
+                        time.sleep(delay)
+                        self._refresh_connection()
+                        continue
+                    else:
+                        log.error(f"Stream error persists after {DB_MAX_RETRIES + 1} attempts: {e}")
+                        raise
+                elif is_retryable_error(e):
+                    last_exception = e
+                    if attempt < DB_MAX_RETRIES:
+                        delay = min(DB_BASE_DELAY * (DB_EXPONENTIAL_BASE ** attempt), DB_MAX_DELAY)
+                        log.warning(f"Database error (attempt {attempt + 1}/{DB_MAX_RETRIES + 1}), "
+                                   f"retrying in {delay:.1f}s: {e}")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        log.error(f"Database operation failed after {DB_MAX_RETRIES + 1} attempts: {e}")
+                        raise
+                else:
+                    log.error(f"Non-retryable database error: {e}")
+                    raise
+
+        raise last_exception
+
+    def execute(self, sql: str, parameters: tuple = None):
+        """Execute SQL with automatic retry and connection refresh on stream errors."""
+        if parameters:
+            return self._execute_with_refresh("execute", sql, parameters)
+        return self._execute_with_refresh("execute", sql)
+
+    def commit(self):
+        """Commit transaction with automatic retry and connection refresh."""
+        return self._execute_with_refresh("commit")
+
     def executemany(self, sql: str, parameters_list: list):
         """Execute SQL with multiple parameter sets (batch operation)."""
-        return self._conn.executemany(sql, parameters_list)
+        return self._execute_with_refresh("executemany", sql, parameters_list)
 
     def __getattr__(self, name):
         """Delegate other attributes to underlying connection."""
@@ -160,8 +238,8 @@ def get_connection():
             os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
         conn = libsql.connect(database=url)
     
-    # Wrap in TursoConnection for retry logic
-    return TursoConnection(conn)
+    # Wrap in TursoConnection for retry logic and connection refresh capability
+    return TursoConnection(conn, url=url, auth_token=auth_token)
 
 
 def init_database(conn) -> None:
@@ -1010,7 +1088,7 @@ def upsert_chapters_batch(conn, chapters_by_video: dict[str, list[dict]], commit
     # Delete old chapters for all videos in one query
     video_ids = list(chapters_by_video.keys())
     placeholders = ','.join(['?' for _ in video_ids])
-    conn.execute(f"DELETE FROM chapters WHERE video_id IN ({placeholders})", video_ids)
+    conn.execute(f"DELETE FROM chapters WHERE video_id IN ({placeholders})", tuple(video_ids))
 
     # Prepare all chapter inserts
     params = []

@@ -96,8 +96,10 @@ def retry_with_backoff(
                         ConnectionResetError,
                         TimeoutError,
                         ssl.SSLError,
-                        OSError) as e:
+                        OSError,
+                        AttributeError) as e:
                     # OSError catches low-level network errors including SSLEOFError
+                    # AttributeError catches httplib2 thread-safety issues ('NoneType' has no attribute 'read')
                     last_exception = e
                     if attempt < max_retries:
                         delay = min(base_delay * (exponential_base ** attempt), max_delay)

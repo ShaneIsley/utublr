@@ -66,8 +66,9 @@ settings:
   # Parallel workers for comment fetching (1=sequential, 3-5 recommended)
   comment_workers: 3
 
-  # Parallel workers for channel processing (1=sequential, 2-3 recommended)
+  # Parallel workers for channel processing (1=sequential, 2-3 for faster runs)
   # Each worker creates its own DB connection and API client
+  # Quota tracking uses a dedicated connection with auto-checkpointing
   channel_workers: 2
 
   # Video discovery mode:

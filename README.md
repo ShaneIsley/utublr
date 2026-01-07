@@ -171,6 +171,7 @@ python test_transcript.py --channel @samwitteveenai --limit 50 --quiet
 | `--max-comment-videos` | 200 | Max videos to fetch comments for per run |
 | `--video-discovery-mode` | auto | Video discovery: auto, search, or playlist |
 | `--comment-workers` | 3 | Parallel workers for comment fetching (1=sequential) |
+| `--channel-workers` | 1 | Parallel workers for channel processing (1=sequential) |
 | `--batch-size` | 10 | Videos per batch/commit |
 | `--stats-update-hours` | 6 | Skip stats if updated within N hours |
 | `--comments-update-hours` | 24 | Skip comments if fetched within N hours |
@@ -220,8 +221,9 @@ Progress is saved after each batch. If a run fails:
 
 ### Quota Protection
 - Tracks quota usage across runs (persisted to database)
-- Warns at 80% usage
-- Aborts at 95% usage
+- Auto-checkpoints every 500 quota units for crash safety
+- Saves at phase transitions (videos → stats → comments)
+- Warns at 80% usage, aborts at 95%
 - Estimates cost before fetching each channel
 
 ## Logging
@@ -269,6 +271,42 @@ fetch_log       -- Run history
 fetch_progress  -- Resume checkpoints
 quota_usage     -- API quota tracking
 ```
+
+## Parallel Processing
+
+The fetcher supports parallel processing at two levels for faster runs:
+
+### Channel Workers
+Process multiple channels simultaneously. Set via config or CLI:
+
+```yaml
+# config/channels.yaml
+settings:
+  channel_workers: 2  # Process 2 channels in parallel
+```
+
+```bash
+python fetch.py --channel-workers 2
+```
+
+Each worker gets its own database connection and YouTube API client to avoid conflicts.
+
+### Comment Workers
+Fetch comments for multiple videos in parallel within a channel:
+
+```yaml
+settings:
+  comment_workers: 3  # Fetch comments from 3 videos simultaneously
+```
+
+### Thread-Safety Design
+
+The system uses several strategies to ensure thread-safety with Turso/libsql:
+
+1. **Per-worker connections**: Each channel worker creates its own database connection
+2. **Fresh connections for quota saves**: Quota persistence creates a new connection per save to avoid libsql's C library thread-safety issues
+3. **Separate locks**: Quota tracking uses separate locks for fast state updates vs slower DB operations
+4. **Auto-checkpointing**: Quota state saves every 500 units spent, plus at phase transitions
 
 ## API Quota Management
 
