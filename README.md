@@ -272,6 +272,34 @@ fetch_progress  -- Resume checkpoints
 quota_usage     -- API quota tracking
 ```
 
+## Database Backends
+
+The fetcher supports two database backends:
+
+### Turso (Default)
+Cloud-hosted SQLite with edge replication. Good for single-worker operations.
+
+```bash
+export DATABASE_BACKEND=turso  # or omit (default)
+export TURSO_DATABASE_URL=libsql://your-db.turso.io
+export TURSO_AUTH_TOKEN=your-token
+```
+
+### PostgreSQL
+Traditional database with excellent concurrency. **Recommended for parallel workers.**
+
+```bash
+export DATABASE_BACKEND=postgres
+export POSTGRES_URL=postgresql://user:pass@host:5432/dbname
+```
+
+PostgreSQL handles concurrent connections much better than Turso's Hrana protocol,
+making it ideal when using `channel_workers > 1`.
+
+**Free PostgreSQL hosting options:**
+- [Neon](https://neon.tech) - Serverless Postgres, generous free tier
+- [Supabase](https://supabase.com) - Postgres with extras, 500MB free
+
 ## Parallel Processing
 
 The fetcher supports parallel processing at two levels for faster runs:
@@ -301,12 +329,17 @@ settings:
 
 ### Thread-Safety Design
 
-The system uses several strategies to ensure thread-safety with Turso/libsql:
+**With PostgreSQL (recommended for parallel):**
+PostgreSQL handles concurrent connections natively. No special handling needed.
+
+**With Turso/libsql:**
+The system uses several strategies to work around Turso's stream-based limitations:
 
 1. **Per-worker connections**: Each channel worker creates its own database connection
-2. **Fresh connections for quota saves**: Quota persistence creates a new connection per save to avoid libsql's C library thread-safety issues
-3. **Separate locks**: Quota tracking uses separate locks for fast state updates vs slower DB operations
-4. **Auto-checkpointing**: Quota state saves every 500 units spent, plus at phase transitions
+2. **Connection refresh**: Automatic reconnection on "stream not found" errors
+3. **Fresh connections for quota saves**: Avoids libsql's C library thread-safety issues
+4. **Separate locks**: Fast state updates vs slower DB operations
+5. **Auto-checkpointing**: Quota state saves every 500 units + at phase transitions
 
 ## API Quota Management
 

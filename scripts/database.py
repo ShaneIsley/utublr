@@ -1,14 +1,19 @@
 """
 Database schema and operations for YouTube metadata tracking.
-Uses Turso (libSQL) for persistent cloud storage.
 
-Supports:
-- Remote Turso database (recommended for production)
+Supports multiple backends:
+- Turso (libSQL) - Cloud SQLite with edge replication
+- PostgreSQL - Traditional database with excellent concurrency
 - Local SQLite file (for development/testing)
+
+Set DATABASE_BACKEND environment variable to choose:
+- "turso" (default) - Uses TURSO_DATABASE_URL and TURSO_AUTH_TOKEN
+- "postgres" - Uses POSTGRES_URL (connection string)
 
 Features:
 - Automatic retry with exponential backoff for transient errors
 - Connection wrapper for resilient database operations
+- Thread-safe connection handling for parallel workers
 """
 
 import json
@@ -210,41 +215,232 @@ class TursoConnection:
         return getattr(self._conn, name)
 
 
+class PostgresConnection:
+    """
+    Wrapper around psycopg connection with automatic retry logic.
+
+    Provides resilient execute() and commit() methods that handle
+    transient PostgreSQL errors with exponential backoff.
+
+    Features:
+    - Converts ? placeholders to %s for PostgreSQL compatibility
+    - Thread-safe with connection pooling
+    - Automatic retry on transient errors
+    """
+
+    # PostgreSQL-specific retryable error patterns
+    PG_RETRYABLE_PATTERNS = [
+        "connection refused",
+        "connection reset",
+        "connection timed out",
+        "too many connections",
+        "server closed the connection",
+        "SSL connection has been closed",
+        "could not connect to server",
+        "temporary failure",
+    ]
+
+    def __init__(self, conn_string: str):
+        self._conn_string = conn_string
+        self._conn = None
+        self._lock = threading.Lock()
+        self._connect()
+
+    def _connect(self):
+        """Create a new connection."""
+        import psycopg
+
+        log.debug("Creating PostgreSQL connection")
+        self._conn = psycopg.connect(self._conn_string, autocommit=False)
+
+    def _is_retryable(self, error: Exception) -> bool:
+        """Check if error is retryable."""
+        error_str = str(error).lower()
+        for pattern in self.PG_RETRYABLE_PATTERNS:
+            if pattern in error_str:
+                return True
+        return False
+
+    def _convert_sql(self, sql: str) -> str:
+        """Convert SQLite SQL syntax to PostgreSQL."""
+        # Convert ? placeholders to %s
+        result = sql.replace("?", "%s")
+
+        # Convert INSERT OR IGNORE to INSERT ... ON CONFLICT DO NOTHING
+        # SQLite: INSERT OR IGNORE INTO table ...
+        # PostgreSQL: INSERT INTO table ... ON CONFLICT DO NOTHING
+        if "INSERT OR IGNORE" in result.upper():
+            result = result.replace("INSERT OR IGNORE", "INSERT")
+            result = result.replace("insert or ignore", "INSERT")
+            # Add ON CONFLICT DO NOTHING before the final closing
+            # This handles both single-row and batch inserts
+            if "ON CONFLICT" not in result.upper():
+                # Find the end of VALUES clause
+                result = result.rstrip()
+                if result.endswith(")"):
+                    result += " ON CONFLICT DO NOTHING"
+
+        return result
+
+    def _convert_placeholders(self, sql: str) -> str:
+        """Convert ? placeholders to %s for PostgreSQL (legacy alias)."""
+        return self._convert_sql(sql)
+
+    def _execute_with_retry(self, method_name: str, sql: str = None, parameters=None):
+        """Execute with retry logic and SQL conversion."""
+        last_exception = None
+
+        for attempt in range(DB_MAX_RETRIES + 1):
+            try:
+                with self._lock:
+                    if sql is not None:
+                        converted_sql = self._convert_sql(sql)
+                        method = getattr(self._conn, method_name)
+                        if parameters:
+                            return method(converted_sql, parameters)
+                        return method(converted_sql)
+                    else:
+                        method = getattr(self._conn, method_name)
+                        return method()
+            except Exception as e:
+                if self._is_retryable(e):
+                    last_exception = e
+                    if attempt < DB_MAX_RETRIES:
+                        delay = min(DB_BASE_DELAY * (DB_EXPONENTIAL_BASE ** attempt), DB_MAX_DELAY)
+                        log.warning(f"PostgreSQL error (attempt {attempt + 1}/{DB_MAX_RETRIES + 1}), "
+                                   f"retrying in {delay:.1f}s: {e}")
+                        time.sleep(delay)
+                        # Reconnect on connection errors
+                        try:
+                            self._connect()
+                        except Exception as conn_err:
+                            log.warning(f"Reconnection failed: {conn_err}")
+                        continue
+                    else:
+                        log.error(f"PostgreSQL operation failed after {DB_MAX_RETRIES + 1} attempts: {e}")
+                        raise
+                else:
+                    log.error(f"Non-retryable PostgreSQL error: {e}")
+                    raise
+
+        raise last_exception
+
+    def execute(self, sql: str, parameters: tuple = None):
+        """Execute SQL with automatic retry and placeholder conversion."""
+        cursor = self._execute_with_retry("execute", sql, parameters)
+        return cursor
+
+    def commit(self):
+        """Commit transaction with automatic retry."""
+        return self._execute_with_retry("commit")
+
+    def executemany(self, sql: str, parameters_list: list):
+        """Execute SQL with multiple parameter sets (batch operation)."""
+        converted_sql = self._convert_sql(sql)
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.executemany(converted_sql, parameters_list)
+            return cursor
+
+    def fetchone(self):
+        """Fetch one result from last execute."""
+        with self._lock:
+            return self._conn.cursor().fetchone()
+
+    def fetchall(self):
+        """Fetch all results from last execute."""
+        with self._lock:
+            return self._conn.cursor().fetchall()
+
+    def close(self):
+        """Close the connection."""
+        with self._lock:
+            if self._conn:
+                self._conn.close()
+                self._conn = None
+
+    def __getattr__(self, name):
+        """Delegate other attributes to underlying connection."""
+        return getattr(self._conn, name)
+
+
+# Track current database backend globally
+_current_backend = None
+
+
+def get_database_backend() -> str:
+    """Get the current database backend type."""
+    global _current_backend
+    if _current_backend is None:
+        _current_backend = os.environ.get("DATABASE_BACKEND", "turso").lower()
+    return _current_backend
+
+
+def is_postgres() -> bool:
+    """Check if using PostgreSQL backend."""
+    return get_database_backend() == "postgres"
+
+
 def get_connection():
     """
     Get a resilient connection to the database.
-    
-    Returns a TursoConnection wrapper that handles transient errors.
-    
+
+    Returns a connection wrapper appropriate for the configured backend.
+
     Environment variables:
+    - DATABASE_BACKEND: "turso" (default) or "postgres"
+
+    For Turso:
     - TURSO_DATABASE_URL: libsql://your-db.turso.io (or file:local.db for local)
     - TURSO_AUTH_TOKEN: Your Turso auth token (not needed for local)
+
+    For PostgreSQL:
+    - POSTGRES_URL: postgresql://user:pass@host:port/dbname
     """
-    import libsql_experimental as libsql
-    
-    url = os.environ.get("TURSO_DATABASE_URL", "file:data/youtube.db")
-    auth_token = os.environ.get("TURSO_AUTH_TOKEN", "")
-    
-    log.debug(f"Connecting to database: {url[:30]}...")
-    
-    if url.startswith("libsql://") or url.startswith("https://"):
-        # Remote Turso database
-        conn = libsql.connect(database=url, auth_token=auth_token)
+    backend = get_database_backend()
+
+    if backend == "postgres":
+        # PostgreSQL backend
+        conn_string = os.environ.get("POSTGRES_URL")
+        if not conn_string:
+            raise ValueError("POSTGRES_URL environment variable required for postgres backend")
+
+        log.debug(f"Connecting to PostgreSQL: {conn_string[:30]}...")
+        return PostgresConnection(conn_string)
+
     else:
-        # Local SQLite file
-        # Ensure directory exists for local file
-        if url.startswith("file:"):
-            filepath = url[5:]
-            os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
-        conn = libsql.connect(database=url)
-    
-    # Wrap in TursoConnection for retry logic and connection refresh capability
-    return TursoConnection(conn, url=url, auth_token=auth_token)
+        # Turso/libsql backend (default)
+        import libsql_experimental as libsql
+
+        url = os.environ.get("TURSO_DATABASE_URL", "file:data/youtube.db")
+        auth_token = os.environ.get("TURSO_AUTH_TOKEN", "")
+
+        log.debug(f"Connecting to database: {url[:30]}...")
+
+        if url.startswith("libsql://") or url.startswith("https://"):
+            # Remote Turso database
+            conn = libsql.connect(database=url, auth_token=auth_token)
+        else:
+            # Local SQLite file
+            # Ensure directory exists for local file
+            if url.startswith("file:"):
+                filepath = url[5:]
+                os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+            conn = libsql.connect(database=url)
+
+        # Wrap in TursoConnection for retry logic and connection refresh capability
+        return TursoConnection(conn, url=url, auth_token=auth_token)
 
 
 def init_database(conn) -> None:
-    """Initialize database schema."""
-    
+    """Initialize database schema.
+
+    Automatically uses PostgreSQL-specific schema when that backend is active.
+    """
+    if is_postgres():
+        return init_database_postgres(conn)
+
+    # SQLite/Turso schema follows
     # Channels dimension table
     conn.execute("""
         CREATE TABLE IF NOT EXISTS channels (
@@ -427,6 +623,192 @@ def init_database(conn) -> None:
     # Optimizes queries like "get comments on video X after date Y"
     conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_video_published ON comments(video_id, published_at)")
     
+    conn.commit()
+
+
+def init_database_postgres(conn) -> None:
+    """Initialize PostgreSQL database schema.
+
+    Uses PostgreSQL-specific syntax (SERIAL, TIMESTAMP, etc.)
+    """
+    # Channels dimension table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS channels (
+            channel_id TEXT PRIMARY KEY,
+            title TEXT,
+            description TEXT,
+            custom_url TEXT,
+            country TEXT,
+            published_at TEXT,
+            thumbnail_url TEXT,
+            banner_url TEXT,
+            keywords TEXT,
+            topic_categories TEXT,
+            uploads_playlist_id TEXT,
+            updated_at TEXT
+        )
+    """)
+
+    # Channel stats time series
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS channel_stats (
+            channel_id TEXT,
+            fetched_at TEXT,
+            subscriber_count BIGINT,
+            view_count BIGINT,
+            video_count INTEGER,
+            PRIMARY KEY (channel_id, fetched_at)
+        )
+    """)
+
+    # Videos dimension table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS videos (
+            video_id TEXT PRIMARY KEY,
+            channel_id TEXT,
+            title TEXT,
+            description TEXT,
+            published_at TEXT,
+            duration_seconds INTEGER,
+            duration_iso TEXT,
+            category_id TEXT,
+            default_language TEXT,
+            default_audio_language TEXT,
+            tags TEXT,
+            thumbnail_url TEXT,
+            caption_available INTEGER,
+            definition TEXT,
+            dimension TEXT,
+            projection TEXT,
+            privacy_status TEXT,
+            license TEXT,
+            embeddable INTEGER,
+            made_for_kids INTEGER,
+            topic_categories TEXT,
+            has_chapters INTEGER DEFAULT 0,
+            first_seen_at TEXT,
+            updated_at TEXT
+        )
+    """)
+
+    # Video stats time series
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS video_stats (
+            video_id TEXT,
+            fetched_at TEXT,
+            view_count BIGINT,
+            like_count BIGINT,
+            comment_count INTEGER,
+            PRIMARY KEY (video_id, fetched_at)
+        )
+    """)
+
+    # Chapters
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chapters (
+            video_id TEXT,
+            chapter_index INTEGER,
+            title TEXT,
+            start_seconds INTEGER,
+            end_seconds INTEGER,
+            PRIMARY KEY (video_id, chapter_index)
+        )
+    """)
+
+    # Transcripts (write-once)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS transcripts (
+            video_id TEXT PRIMARY KEY,
+            language TEXT,
+            language_code TEXT,
+            transcript_type TEXT,
+            full_text TEXT,
+            entries_json TEXT,
+            fetched_at TEXT
+        )
+    """)
+
+    # Comments
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS comments (
+            comment_id TEXT PRIMARY KEY,
+            video_id TEXT,
+            parent_comment_id TEXT,
+            author_display_name TEXT,
+            author_channel_id TEXT,
+            text TEXT,
+            like_count INTEGER,
+            published_at TEXT,
+            updated_at TEXT,
+            fetched_at TEXT
+        )
+    """)
+
+    # Playlists
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS playlists (
+            playlist_id TEXT PRIMARY KEY,
+            channel_id TEXT,
+            title TEXT,
+            description TEXT,
+            published_at TEXT,
+            thumbnail_url TEXT,
+            item_count INTEGER,
+            privacy_status TEXT,
+            updated_at TEXT
+        )
+    """)
+
+    # Fetch log - use SERIAL for auto-increment in PostgreSQL
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS fetch_log (
+            fetch_id SERIAL PRIMARY KEY,
+            channel_id TEXT,
+            fetch_type TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            videos_fetched INTEGER,
+            comments_fetched INTEGER,
+            transcripts_fetched INTEGER,
+            errors TEXT,
+            status TEXT
+        )
+    """)
+
+    # Fetch progress for resumable operations
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS fetch_progress (
+            channel_id TEXT,
+            fetch_id INTEGER,
+            operation TEXT,
+            processed_ids TEXT,
+            total_count INTEGER,
+            last_updated TEXT,
+            PRIMARY KEY (channel_id, fetch_id, operation)
+        )
+    """)
+
+    # Quota tracking (persists across runs)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS quota_usage (
+            date TEXT PRIMARY KEY,
+            used INTEGER,
+            operations TEXT,
+            last_updated TEXT
+        )
+    """)
+
+    # Create indexes (PostgreSQL syntax is the same)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_channel ON videos(channel_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_published ON videos(published_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_video_stats_fetched ON video_stats(fetched_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_video_stats_video ON video_stats(video_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_video ON comments(video_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_published ON comments(published_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_channel_stats_fetched ON channel_stats(fetched_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_channel_published ON videos(channel_id, published_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_video_published ON comments(video_id, published_at)")
+
     conn.commit()
 
 
@@ -807,14 +1189,26 @@ def should_update_channel_stats(conn, channel_id: str, hours: int = 6) -> bool:
 def start_fetch_log(conn, channel_id: str, fetch_type: str) -> int:
     """Start a fetch log entry, return the fetch_id."""
     now = datetime.now().isoformat()
-    conn.execute("""
-        INSERT INTO fetch_log (channel_id, fetch_type, started_at, status)
-        VALUES (?, ?, ?, 'running')
-    """, (channel_id, fetch_type, now,))
-    conn.commit()
-    
-    result = conn.execute("SELECT last_insert_rowid()").fetchone()
-    return result[0]
+
+    if is_postgres():
+        # PostgreSQL: use RETURNING to get the auto-generated ID
+        result = conn.execute("""
+            INSERT INTO fetch_log (channel_id, fetch_type, started_at, status)
+            VALUES (?, ?, ?, 'running')
+            RETURNING fetch_id
+        """, (channel_id, fetch_type, now,))
+        row = result.fetchone()
+        conn.commit()
+        return row[0]
+    else:
+        # SQLite/Turso: use last_insert_rowid()
+        conn.execute("""
+            INSERT INTO fetch_log (channel_id, fetch_type, started_at, status)
+            VALUES (?, ?, ?, 'running')
+        """, (channel_id, fetch_type, now,))
+        conn.commit()
+        result = conn.execute("SELECT last_insert_rowid()").fetchone()
+        return result[0]
 
 
 def complete_fetch_log(conn, fetch_id: int, 
