@@ -1,14 +1,54 @@
 """
 Logging configuration for YouTube metadata fetcher.
 Provides both console and file logging with DEBUG level for development.
+
+Supports thread-local channel context for parallel processing - each log
+line is automatically prefixed with the current channel identifier.
 """
 
 import logging
 import os
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+# Thread-local storage for current channel context
+_channel_context = threading.local()
+
+
+def set_channel_context(channel_id: str) -> None:
+    """Set the current channel context for this thread's log messages."""
+    _channel_context.channel = channel_id
+
+
+def get_channel_context() -> Optional[str]:
+    """Get the current channel context for this thread."""
+    return getattr(_channel_context, 'channel', None)
+
+
+def clear_channel_context() -> None:
+    """Clear the channel context for this thread."""
+    _channel_context.channel = None
+
+
+class ChannelContextFormatter(logging.Formatter):
+    """Formatter that includes thread-local channel context in log messages."""
+
+    def format(self, record):
+        # Add channel prefix if context is set
+        channel = get_channel_context()
+        if channel:
+            # Use short form: @handle -> [handle], UCxxxx -> [UCxx...]
+            if channel.startswith('@'):
+                short = channel[1:13]  # Remove @ and truncate
+            elif channel.startswith('UC'):
+                short = channel[:8]  # First 8 chars of channel ID
+            else:
+                short = channel[:10]
+            record.msg = f"[{short}] {record.msg}"
+        return super().format(record)
 
 
 def setup_logging(
@@ -41,14 +81,14 @@ def setup_logging(
     # Clear existing handlers
     logger.handlers = []
     
-    # Detailed format for file
-    file_formatter = logging.Formatter(
+    # Detailed format for file (with channel context)
+    file_formatter = ChannelContextFormatter(
         '%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d | %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
-    
-    # Simpler format for console
-    console_formatter = logging.Formatter(
+
+    # Simpler format for console (with channel context)
+    console_formatter = ChannelContextFormatter(
         '%(asctime)s | %(levelname)-8s | %(message)s',
         datefmt='%H:%M:%S'
     )

@@ -30,7 +30,7 @@ from typing import Callable, Optional
 import yaml
 
 # Initialize logging first
-from logger import setup_logging, get_logger, LogContext
+from logger import setup_logging, get_logger, LogContext, set_channel_context, clear_channel_context
 
 # Set up logging before other imports
 logger = setup_logging(log_dir="logs")
@@ -316,23 +316,22 @@ def fetch_channel_data(
             raise TimeoutError(f"Time limit approaching: only {remaining:.1f} minutes remaining")
         return int(remaining)
     
+    # Set channel context for log messages (shows prefix in parallel mode)
+    set_channel_context(channel_identifier)
+
     # Resolve channel ID
-    log.info(f"{'='*60}")
     log.info(f"Processing: {channel_identifier}")
-    log.info(f"{'='*60}")
-    
+
     with LogContext(log, f"Resolving channel ID for {channel_identifier}"):
         channel_id = fetcher.resolve_channel_id(channel_identifier)
         quota.use('channels.list')  # Resolution uses API
     
-    log.info(f"Resolved channel ID: {channel_id}")
-    
+    log.debug(f"Resolved channel ID: {channel_id}")
+
     # Determine fetch type
     last_fetch = get_last_fetch_time(conn, channel_id)
     fetch_type = "backfill" if backfill or not last_fetch else "incremental"
-    log.info(f"Fetch type: {fetch_type}")
-    if last_fetch:
-        log.info(f"Last fetch: {last_fetch}")
+    log.debug(f"Fetch type: {fetch_type}, last fetch: {last_fetch}")
     
     # Start fetch log
     fetch_id = start_fetch_log(conn, channel_id, fetch_type)
@@ -358,21 +357,27 @@ def fetch_channel_data(
             quota.use('channels.list')
             upsert_channel(conn, channel_data)
         
-        log.info(f"Channel: {channel_data['title']}")
-        log.info(f"Subscribers: {channel_data['statistics']['subscriber_count']:,}")
-        log.info(f"Total videos: {channel_data['statistics']['video_count']:,}")
-        
+        # Compact channel info with human-readable subscriber count
+        sub_count = channel_data['statistics']['subscriber_count']
+        if sub_count >= 1_000_000:
+            sub_str = f"{sub_count / 1_000_000:.1f}M"
+        elif sub_count >= 1_000:
+            sub_str = f"{sub_count / 1_000:.0f}k"
+        else:
+            sub_str = str(sub_count)
+        video_count = channel_data['statistics']['video_count']
+        log.info(f"{channel_data['title']} ({sub_str} subs, {video_count} videos)")
+
         # Estimate quota needed
         estimated_quota = quota.estimate_channel_cost(
-            video_count=min(max_videos or 99999, channel_data['statistics']['video_count']),
+            video_count=min(max_videos or 99999, video_count),
             fetch_comments=fetch_comments,
             max_comments_per_video=max_comments_per_video
         )
-        log.info(f"Estimated quota needed: {estimated_quota['total']} units")
-        log.info(f"Quota remaining: {quota.remaining()} units")
-        
+        log.debug(f"Estimated quota: {estimated_quota['total']} units, remaining: {quota.remaining()}")
+
         if estimated_quota['total'] > quota.remaining():
-            log.warning(f"Insufficient quota for full fetch. Will do partial.")
+            log.warning(f"Insufficient quota for full fetch, will do partial")
         
         # Channel stats
         if backfill or should_update_channel_stats(conn, channel_id, stats_update_hours):
@@ -428,10 +433,7 @@ def fetch_channel_data(
                 else:
                     log.info("No videos need comment updates")
 
-            # Checkpoint quota before early return
-            quota.flush()
-
-            # Update fetch log and return early
+            # Update fetch log for early completion
             error_str = "; ".join(stats["errors"][:10]) if stats["errors"] else None
             complete_fetch_log(
                 conn, fetch_id,
@@ -441,6 +443,12 @@ def fetch_channel_data(
                 status="completed",
                 errors=error_str
             )
+
+            # Concise summary and cleanup for early return
+            elapsed = time.time() - start_time
+            log.info(f"✓ Done in {elapsed:.0f}s: no new videos, {stats['comments_fetched']} comments")
+            quota.flush()
+            clear_channel_context()
             return stats
         
         # ================================================================
@@ -768,12 +776,14 @@ def fetch_channel_data(
             errors=error_str
         )
         
-        log.info(f"✅ Completed: {channel_data['title']}")
+        # Concise summary line for parallel processing readability
+        elapsed = time.time() - start_time
+        log.info(f"✓ Done in {elapsed:.0f}s: {stats['videos_new']} new, "
+                 f"{stats['videos_stats_updated']} stats, {stats['comments_fetched']} comments")
         quota.flush()  # Final checkpoint on success
-        quota.log_summary()
 
     except QuotaExhaustedError as e:
-        log.error(f"Quota exhausted: {e}")
+        log.error(f"✗ Quota exhausted: {e}")
         quota.flush()  # Save quota state on error
         complete_fetch_log(conn, fetch_id,
                           stats["videos_fetched"], stats["comments_fetched"],
@@ -783,7 +793,7 @@ def fetch_channel_data(
         stats["errors"].append(str(e))
 
     except TimeoutError as e:
-        log.error(f"Timeout approaching: {e}")
+        log.error(f"✗ Timeout: {e}")
         quota.flush()  # Save quota state on timeout
         complete_fetch_log(conn, fetch_id,
                           stats["videos_fetched"], stats["comments_fetched"],
@@ -792,13 +802,17 @@ def fetch_channel_data(
         stats["errors"].append(str(e))
 
     except Exception as e:
-        log.exception(f"Fetch failed: {e}")
+        log.exception(f"✗ Failed: {e}")
         quota.flush()  # Save quota state on failure
         complete_fetch_log(conn, fetch_id,
                           stats["videos_fetched"], stats["comments_fetched"],
                           stats["transcripts_fetched"],
                           status="failed", errors=str(e))
         raise
+
+    finally:
+        # Clear channel context for this thread
+        clear_channel_context()
 
     return stats
 
