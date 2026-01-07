@@ -148,13 +148,19 @@ class TursoConnection:
             else:
                 self._conn = libsql.connect(database=self._url)
 
-    def _execute_with_refresh(self, operation, *args, **kwargs):
-        """Execute an operation with connection refresh on stream errors."""
+    def _execute_with_refresh(self, method_name: str, *args, **kwargs):
+        """Execute an operation with connection refresh on stream errors.
+
+        IMPORTANT: Takes method_name (string) instead of bound method to ensure
+        we use the NEW connection after refresh, not the old captured one.
+        """
         last_exception = None
 
         for attempt in range(DB_MAX_RETRIES + 1):
             try:
-                return operation(*args, **kwargs)
+                # Get fresh method reference from current connection each attempt
+                method = getattr(self._conn, method_name)
+                return method(*args, **kwargs)
             except Exception as e:
                 if needs_connection_refresh(e):
                     last_exception = e
@@ -188,16 +194,16 @@ class TursoConnection:
     def execute(self, sql: str, parameters: tuple = None):
         """Execute SQL with automatic retry and connection refresh on stream errors."""
         if parameters:
-            return self._execute_with_refresh(self._conn.execute, sql, parameters)
-        return self._execute_with_refresh(self._conn.execute, sql)
+            return self._execute_with_refresh("execute", sql, parameters)
+        return self._execute_with_refresh("execute", sql)
 
     def commit(self):
         """Commit transaction with automatic retry and connection refresh."""
-        return self._execute_with_refresh(self._conn.commit)
+        return self._execute_with_refresh("commit")
 
     def executemany(self, sql: str, parameters_list: list):
         """Execute SQL with multiple parameter sets (batch operation)."""
-        return self._execute_with_refresh(self._conn.executemany, sql, parameters_list)
+        return self._execute_with_refresh("executemany", sql, parameters_list)
 
     def __getattr__(self, name):
         """Delegate other attributes to underlying connection."""

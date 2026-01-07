@@ -38,8 +38,9 @@ class ChannelContextFormatter(logging.Formatter):
 
     def format(self, record):
         # Add channel prefix if context is set
+        # Use a custom attribute to avoid double-prefixing when multiple handlers format the same record
         channel = get_channel_context()
-        if channel:
+        if channel and not getattr(record, '_channel_prefixed', False):
             # Use short form: @handle -> [handle], UCxxxx -> [UCxx...]
             if channel.startswith('@'):
                 short = channel[1:13]  # Remove @ and truncate
@@ -48,6 +49,7 @@ class ChannelContextFormatter(logging.Formatter):
             else:
                 short = channel[:10]
             record.msg = f"[{short}] {record.msg}"
+            record._channel_prefixed = True
         return super().format(record)
 
 
