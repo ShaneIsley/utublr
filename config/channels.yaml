@@ -66,9 +66,10 @@ settings:
   # Parallel workers for comment fetching (1=sequential, 3-5 recommended)
   comment_workers: 3
 
-  # Parallel workers for channel processing (1=sequential, 2-3 recommended)
+  # Parallel workers for channel processing (1=sequential, 2-3 for faster runs)
+  # NOTE: Disabled by default due to Turso/libsql connection stream conflicts
   # Each worker creates its own DB connection and API client
-  channel_workers: 2
+  channel_workers: 1
 
   # Video discovery mode:
   # - auto: Use search API for incremental updates, playlist for backfill (default)

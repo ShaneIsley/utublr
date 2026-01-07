@@ -1010,7 +1010,7 @@ def upsert_chapters_batch(conn, chapters_by_video: dict[str, list[dict]], commit
     # Delete old chapters for all videos in one query
     video_ids = list(chapters_by_video.keys())
     placeholders = ','.join(['?' for _ in video_ids])
-    conn.execute(f"DELETE FROM chapters WHERE video_id IN ({placeholders})", video_ids)
+    conn.execute(f"DELETE FROM chapters WHERE video_id IN ({placeholders})", tuple(video_ids))
 
     # Prepare all chapter inserts
     params = []
