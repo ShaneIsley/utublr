@@ -242,6 +242,27 @@ def get_connection():
     return TursoConnection(conn, url=url, auth_token=auth_token)
 
 
+def get_batch_client():
+    """
+    Get a libsql_client sync client for batch operations.
+
+    The libsql_client package provides batch() which sends multiple statements
+    in a single network round-trip, much faster than individual executes.
+
+    Returns a context manager that should be used with 'with' statement.
+    """
+    import libsql_client
+
+    url = os.environ.get("TURSO_DATABASE_URL", "file:data/youtube.db")
+    auth_token = os.environ.get("TURSO_AUTH_TOKEN", "")
+
+    # libsql_client uses different URL format for local files
+    if url.startswith("file:"):
+        return libsql_client.create_client_sync(url)
+    else:
+        return libsql_client.create_client_sync(url, auth_token=auth_token)
+
+
 def init_database(conn) -> None:
     """Initialize database schema."""
     
@@ -964,10 +985,13 @@ def insert_video_stats(conn, video_id: str, stats: dict, commit: bool = True) ->
 
 
 def insert_video_stats_batch(conn, video_stats: list[tuple[str, dict]]) -> int:
-    """Insert multiple video stats in a single transaction using executemany.
+    """Insert multiple video stats using batch API for efficient network transfer.
+
+    Uses libsql_client.batch() to send all INSERT statements in a single network
+    round-trip, which is much faster than executemany() for remote databases.
 
     Args:
-        conn: Database connection
+        conn: Database connection (unused, kept for API compatibility)
         video_stats: List of (video_id, stats_dict) tuples
 
     Returns:
@@ -976,26 +1000,30 @@ def insert_video_stats_batch(conn, video_stats: list[tuple[str, dict]]) -> int:
     if not video_stats:
         return 0
 
-    now = datetime.now().isoformat()
+    import libsql_client
 
-    # Prepare all parameters at once
-    params = [
-        (
-            video_id,
-            now,
-            stats.get('view_count', 0),
-            stats.get('like_count', 0),
-            stats.get('comment_count', 0)
+    now = datetime.now().isoformat()
+    sql = "INSERT OR IGNORE INTO video_stats (video_id, fetched_at, view_count, like_count, comment_count) VALUES (?, ?, ?, ?, ?)"
+
+    # Build list of Statement objects for batch execution
+    statements = [
+        libsql_client.Statement(
+            sql,
+            [
+                video_id,
+                now,
+                stats.get('view_count', 0),
+                stats.get('like_count', 0),
+                stats.get('comment_count', 0)
+            ]
         )
         for video_id, stats in video_stats
     ]
 
-    # Single batch insert
-    conn.executemany("""
-        INSERT OR IGNORE INTO video_stats (video_id, fetched_at, view_count, like_count, comment_count)
-        VALUES (?, ?, ?, ?, ?)
-    """, params)
-    conn.commit()
+    # Execute all statements in a single batch request
+    with get_batch_client() as client:
+        client.batch(statements)
+
     return len(video_stats)
 
 
