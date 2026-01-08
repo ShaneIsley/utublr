@@ -307,7 +307,8 @@ def fetch_channel_data(
         ]
     
     start_time = start_time or time.time()
-    
+    channel_start_time = time.time()  # Per-channel timing (start_time is for overall budget)
+
     def check_time_budget() -> int:
         """Check remaining time, raise if too low."""
         elapsed_minutes = (time.time() - start_time) / 60
@@ -445,7 +446,7 @@ def fetch_channel_data(
             )
 
             # Concise summary and cleanup for early return
-            elapsed = time.time() - start_time
+            elapsed = time.time() - channel_start_time
             log.info(f"✓ Done in {elapsed:.0f}s: no new videos, {stats['comments_fetched']} comments")
             quota.flush()
             clear_channel_context()
@@ -777,7 +778,7 @@ def fetch_channel_data(
         )
         
         # Concise summary line for parallel processing readability
-        elapsed = time.time() - start_time
+        elapsed = time.time() - channel_start_time
         log.info(f"✓ Done in {elapsed:.0f}s: {stats['videos_new']} new, "
                  f"{stats['videos_stats_updated']} stats, {stats['comments_fetched']} comments")
         quota.flush()  # Final checkpoint on success
