@@ -205,20 +205,6 @@ class TursoConnection:
         """Execute SQL with multiple parameter sets (batch operation)."""
         return self._execute_with_refresh("executemany", sql, parameters_list)
 
-    def batch(self, statements: list):
-        """Execute multiple statements in a single batch request.
-
-        This sends all statements in one network round-trip to Turso,
-        which is much faster than executing them individually.
-
-        Args:
-            statements: List of (sql, params) tuples
-
-        Returns:
-            List of results from each statement
-        """
-        return self._execute_with_refresh("batch", statements)
-
     def __getattr__(self, name):
         """Delegate other attributes to underlying connection."""
         return getattr(self._conn, name)
@@ -978,10 +964,7 @@ def insert_video_stats(conn, video_id: str, stats: dict, commit: bool = True) ->
 
 
 def insert_video_stats_batch(conn, video_stats: list[tuple[str, dict]]) -> int:
-    """Insert multiple video stats using batch API for efficient network transfer.
-
-    Uses libsql batch() to send all INSERT statements in a single network
-    round-trip, which is much faster than executemany() for remote databases.
+    """Insert multiple video stats in a single transaction using executemany.
 
     Args:
         conn: Database connection
@@ -994,25 +977,25 @@ def insert_video_stats_batch(conn, video_stats: list[tuple[str, dict]]) -> int:
         return 0
 
     now = datetime.now().isoformat()
-    sql = "INSERT OR IGNORE INTO video_stats (video_id, fetched_at, view_count, like_count, comment_count) VALUES (?, ?, ?, ?, ?)"
 
-    # Build list of (sql, params) tuples for batch execution
-    statements = [
+    # Prepare all parameters at once
+    params = [
         (
-            sql,
-            [
-                video_id,
-                now,
-                stats.get('view_count', 0),
-                stats.get('like_count', 0),
-                stats.get('comment_count', 0)
-            ]
+            video_id,
+            now,
+            stats.get('view_count', 0),
+            stats.get('like_count', 0),
+            stats.get('comment_count', 0)
         )
         for video_id, stats in video_stats
     ]
 
-    # Execute all statements in a single batch request
-    conn.batch(statements)
+    # Single batch insert
+    conn.executemany("""
+        INSERT OR IGNORE INTO video_stats (video_id, fetched_at, view_count, like_count, comment_count)
+        VALUES (?, ?, ?, ?, ?)
+    """, params)
+    conn.commit()
     return len(video_stats)
 
 
