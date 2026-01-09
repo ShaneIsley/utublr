@@ -82,7 +82,7 @@ settings:
   # Quota tracking uses a dedicated connection with auto-checkpointing
   # NOTE: Turso/libsql backend auto-disables parallel workers due to thread-safety issues
   #       Use PostgreSQL backend (DATABASE_BACKEND=postgres) for parallel processing
-  channel_workers: 2
+  channel_workers: 1
 
   # Video discovery mode:
   # - auto: Use search API for incremental updates, playlist for backfill (default)
