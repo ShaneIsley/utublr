@@ -56,11 +56,28 @@ CONNECTION_REFRESH_PATTERNS = [
     "Stream already in use",
 ]
 
+# Patterns that indicate JWT token expiry or auth issues (not retryable)
+JWT_TOKEN_ERROR_PATTERNS = [
+    "token expired",
+    "invalid JWT token",
+    "jwt expired",
+    "token has expired",
+]
+
 # Retry configuration optimized for Turso free tier
 DB_MAX_RETRIES = 5
 DB_BASE_DELAY = 1.0  # Start with 1 second
 DB_MAX_DELAY = 30.0  # Cap at 30 seconds
 DB_EXPONENTIAL_BASE = 2.0
+
+
+def is_jwt_token_error(error: Exception) -> bool:
+    """Check if an error is due to JWT token expiry or auth issues."""
+    error_str = str(error).lower()
+    for pattern in JWT_TOKEN_ERROR_PATTERNS:
+        if pattern.lower() in error_str:
+            return True
+    return False
 
 
 def is_retryable_error(error: Exception) -> bool:
@@ -167,7 +184,29 @@ class TursoConnection:
                 method = getattr(self._conn, method_name)
                 return method(*args, **kwargs)
             except Exception as e:
-                if needs_connection_refresh(e):
+                # Check for JWT token expiry first (not retryable)
+                if is_jwt_token_error(e):
+                    log.error(f"JWT token authentication failed: {e}")
+                    log.error("")
+                    log.error("=" * 70)
+                    log.error("ERROR: Turso database JWT token has expired!")
+                    log.error("=" * 70)
+                    log.error("")
+                    log.error("The TURSO_AUTH_TOKEN environment variable contains an expired token.")
+                    log.error("")
+                    log.error("To fix this issue:")
+                    log.error("1. Generate a new token using: turso db tokens create <database-name>")
+                    log.error("2. Update the TURSO_AUTH_TOKEN secret in GitHub Actions settings")
+                    log.error("3. Or update the TURSO_AUTH_TOKEN environment variable if running locally")
+                    log.error("")
+                    log.error("For more information, see: https://docs.turso.tech/cli/db/tokens/create")
+                    log.error("=" * 70)
+                    raise RuntimeError(
+                        "Turso JWT token has expired. Please generate a new token using "
+                        "'turso db tokens create <database-name>' and update the TURSO_AUTH_TOKEN "
+                        "environment variable or GitHub Actions secret."
+                    ) from e
+                elif needs_connection_refresh(e):
                     last_exception = e
                     if attempt < DB_MAX_RETRIES:
                         delay = min(DB_BASE_DELAY * (DB_EXPONENTIAL_BASE ** attempt), DB_MAX_DELAY)
@@ -417,16 +456,43 @@ def get_connection():
 
         log.debug(f"Connecting to database: {url[:30]}...")
 
-        if url.startswith("libsql://") or url.startswith("https://"):
-            # Remote Turso database
-            conn = libsql.connect(database=url, auth_token=auth_token)
-        else:
-            # Local SQLite file
-            # Ensure directory exists for local file
-            if url.startswith("file:"):
-                filepath = url[5:]
-                os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
-            conn = libsql.connect(database=url)
+        try:
+            if url.startswith("libsql://") or url.startswith("https://"):
+                # Remote Turso database
+                conn = libsql.connect(database=url, auth_token=auth_token)
+            else:
+                # Local SQLite file
+                # Ensure directory exists for local file
+                if url.startswith("file:"):
+                    filepath = url[5:]
+                    os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+                conn = libsql.connect(database=url)
+        except Exception as e:
+            # Check for JWT token errors during initial connection
+            if is_jwt_token_error(e):
+                log.error(f"Failed to connect to Turso database: {e}")
+                log.error("")
+                log.error("=" * 70)
+                log.error("ERROR: Turso database JWT token has expired!")
+                log.error("=" * 70)
+                log.error("")
+                log.error("The TURSO_AUTH_TOKEN environment variable contains an expired token.")
+                log.error("")
+                log.error("To fix this issue:")
+                log.error("1. Generate a new token using: turso db tokens create <database-name>")
+                log.error("2. Update the TURSO_AUTH_TOKEN secret in GitHub Actions settings")
+                log.error("3. Or update the TURSO_AUTH_TOKEN environment variable if running locally")
+                log.error("")
+                log.error("For more information, see: https://docs.turso.tech/cli/db/tokens/create")
+                log.error("=" * 70)
+                raise RuntimeError(
+                    "Turso JWT token has expired. Please generate a new token using "
+                    "'turso db tokens create <database-name>' and update the TURSO_AUTH_TOKEN "
+                    "environment variable or GitHub Actions secret."
+                ) from e
+            else:
+                # Re-raise other connection errors
+                raise
 
         # Wrap in TursoConnection for retry logic and connection refresh capability
         return TursoConnection(conn, url=url, auth_token=auth_token)

@@ -102,17 +102,45 @@ class QuotaTracker:
         with libsql's C library when multiple threads access the same connection.
         """
         import libsql
+        from database import is_jwt_token_error
 
         url = os.environ.get("TURSO_DATABASE_URL", "file:data/youtube.db")
         auth_token = os.environ.get("TURSO_AUTH_TOKEN", "")
 
-        if url.startswith("libsql://") or url.startswith("https://"):
-            return libsql.connect(database=url, auth_token=auth_token)
-        else:
-            if url.startswith("file:"):
-                filepath = url[5:]
-                os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
-            return libsql.connect(database=url)
+        try:
+            if url.startswith("libsql://") or url.startswith("https://"):
+                return libsql.connect(database=url, auth_token=auth_token)
+            else:
+                if url.startswith("file:"):
+                    filepath = url[5:]
+                    os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+                return libsql.connect(database=url)
+        except Exception as e:
+            # Check for JWT token errors
+            if is_jwt_token_error(e):
+                log.error(f"Failed to connect to Turso database: {e}")
+                log.error("")
+                log.error("=" * 70)
+                log.error("ERROR: Turso database JWT token has expired!")
+                log.error("=" * 70)
+                log.error("")
+                log.error("The TURSO_AUTH_TOKEN environment variable contains an expired token.")
+                log.error("")
+                log.error("To fix this issue:")
+                log.error("1. Generate a new token using: turso db tokens create <database-name>")
+                log.error("2. Update the TURSO_AUTH_TOKEN secret in GitHub Actions settings")
+                log.error("3. Or update the TURSO_AUTH_TOKEN environment variable if running locally")
+                log.error("")
+                log.error("For more information, see: https://docs.turso.tech/cli/db/tokens/create")
+                log.error("=" * 70)
+                raise RuntimeError(
+                    "Turso JWT token has expired. Please generate a new token using "
+                    "'turso db tokens create <database-name>' and update the TURSO_AUTH_TOKEN "
+                    "environment variable or GitHub Actions secret."
+                ) from e
+            else:
+                # Re-raise other connection errors
+                raise
 
     def _load_state(self):
         """Load persisted quota state from database."""

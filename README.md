@@ -254,6 +254,43 @@ logs/
 **Note:** Transcripts cannot be fetched in GitHub Actions (YouTube blocks cloud IPs).
 Run `fetch_transcripts.py` locally after the automated fetch completes.
 
+### 3. JWT Token Management
+
+Turso database access tokens (JWT tokens) can expire over time. If you encounter authentication errors:
+
+```
+ERROR: Turso database JWT token has expired!
+```
+
+**To fix:**
+
+1. Generate a new token:
+   ```bash
+   turso db tokens create youtube-tracker
+   ```
+
+2. Update the token in GitHub Actions:
+   - Go to: Settings → Secrets and variables → Actions
+   - Update `TURSO_AUTH_TOKEN` with the new token
+
+3. Or update locally:
+   ```bash
+   export TURSO_AUTH_TOKEN="your-new-token"
+   ```
+
+**Token expiration options:**
+
+By default, tokens created with `turso db tokens create` have a limited lifetime. For long-running automation:
+
+- Create tokens with longer expiration:
+  ```bash
+  turso db tokens create youtube-tracker --expiration none
+  ```
+
+- Or set up token rotation as part of your workflow
+
+For more information: https://docs.turso.tech/cli/db/tokens/create
+
 ## Database Schema
 
 ### Core Tables
@@ -388,6 +425,12 @@ settings:
 ```
 
 ## Troubleshooting
+
+### "JWT token has expired" or "401 Unauthorized"
+- Your Turso database token has expired
+- Generate a new token: `turso db tokens create youtube-tracker`
+- Update the `TURSO_AUTH_TOKEN` secret in GitHub Actions or environment variable
+- See [JWT Token Management](#3-jwt-token-management) section above
 
 ### "Quota exhausted"
 - Quota is tracked in the database and resets at midnight
