@@ -101,7 +101,7 @@ class QuotaTracker:
         Creates a new connection each time to avoid thread-safety issues
         with libsql's C library when multiple threads access the same connection.
         """
-        import libsql_experimental as libsql
+        import libsql
 
         url = os.environ.get("TURSO_DATABASE_URL", "file:data/youtube.db")
         auth_token = os.environ.get("TURSO_AUTH_TOKEN", "")

@@ -139,7 +139,7 @@ class TursoConnection:
             log.warning("Cannot refresh connection: no URL stored")
             return
 
-        import libsql_experimental as libsql
+        import libsql
 
         log.info("Refreshing database connection after stream error")
         with self._lock:
@@ -220,8 +220,8 @@ def get_connection():
     - TURSO_DATABASE_URL: libsql://your-db.turso.io (or file:local.db for local)
     - TURSO_AUTH_TOKEN: Your Turso auth token (not needed for local)
     """
-    import libsql_experimental as libsql
-    
+    import libsql
+
     url = os.environ.get("TURSO_DATABASE_URL", "file:data/youtube.db")
     auth_token = os.environ.get("TURSO_AUTH_TOKEN", "")
     
@@ -964,10 +964,12 @@ def insert_video_stats(conn, video_id: str, stats: dict, commit: bool = True) ->
 
 
 def insert_video_stats_batch(conn, video_stats: list[tuple[str, dict]]) -> int:
-    """Insert multiple video stats in a single transaction using executemany.
+    """Insert multiple video stats in a batch operation.
+
+    Uses executemany with the TursoConnection wrapper for reliable retry logic.
 
     Args:
-        conn: Database connection
+        conn: Database connection with retry support
         video_stats: List of (video_id, stats_dict) tuples
 
     Returns:
@@ -978,7 +980,7 @@ def insert_video_stats_batch(conn, video_stats: list[tuple[str, dict]]) -> int:
 
     now = datetime.now().isoformat()
 
-    # Prepare all parameters at once
+    # Prepare parameters for batch insert
     params = [
         (
             video_id,
@@ -990,12 +992,12 @@ def insert_video_stats_batch(conn, video_stats: list[tuple[str, dict]]) -> int:
         for video_id, stats in video_stats
     ]
 
-    # Single batch insert
-    conn.executemany("""
-        INSERT OR IGNORE INTO video_stats (video_id, fetched_at, view_count, like_count, comment_count)
-        VALUES (?, ?, ?, ?, ?)
-    """, params)
+    conn.executemany(
+        "INSERT OR IGNORE INTO video_stats (video_id, fetched_at, view_count, like_count, comment_count) VALUES (?, ?, ?, ?, ?)",
+        params
+    )
     conn.commit()
+
     return len(video_stats)
 
 
