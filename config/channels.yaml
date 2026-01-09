@@ -68,6 +68,76 @@ channels:
 
 # Global settings (can be overridden per-channel)
 settings:
+  # ============================================================================
+  # DATABASE CONFIGURATION
+  # ============================================================================
+  # Database backend: "turso" (default) or "postgres"
+  # NOTE: Turso/libsql backend auto-disables parallel workers due to thread-safety issues
+  #       Use PostgreSQL backend for parallel processing
+  database_backend: turso
+
+  # Database URL for Turso/libsql backend
+  # Format: "file:path/to/local.db" for local SQLite or "libsql://your-db.turso.io" for remote
+  # Can also be set via TURSO_DATABASE_URL environment variable
+  database_url: file:data/youtube.db
+
+  # NOTE: Authentication tokens should be set via environment variables for security:
+  # - TURSO_AUTH_TOKEN: Auth token for remote Turso databases
+  # - POSTGRES_URL: Full connection string for PostgreSQL (when database_backend: postgres)
+
+  # ============================================================================
+  # LOGGING CONFIGURATION
+  # ============================================================================
+  log_dir: logs
+  log_level: DEBUG                   # File logging level
+  console_log_level: INFO            # Console output level
+
+  # ============================================================================
+  # API RETRY SETTINGS
+  # ============================================================================
+  api_max_retries: 3                 # Max retries for YouTube API calls
+  api_base_delay: 1.0                # Initial retry delay (seconds)
+  api_max_delay: 60.0                # Maximum retry delay (seconds)
+
+  # ============================================================================
+  # DATABASE RETRY SETTINGS
+  # ============================================================================
+  db_max_retries: 5                  # Max retries for database operations
+  db_base_delay: 1.0                 # Initial retry delay (seconds)
+  db_max_delay: 30.0                 # Maximum retry delay (seconds)
+  db_exponential_base: 2.0           # Exponential backoff multiplier
+
+  # ============================================================================
+  # RUNTIME LIMITS
+  # ============================================================================
+  max_runtime_minutes: 300           # Stop fetching after this (5 hours default)
+  default_batch_size: 10             # Videos per batch for processing
+
+  # ============================================================================
+  # QUOTA SETTINGS
+  # ============================================================================
+  quota_limit: 10000                 # Daily API quota limit
+  quota_warn_threshold: 0.8          # Warn at 80% usage
+  quota_abort_threshold: 0.95        # Abort at 95% usage
+  quota_checkpoint_threshold: 500    # Auto-save quota state every N units
+
+  # ============================================================================
+  # PERFORMANCE TUNING
+  # ============================================================================
+  default_comment_workers: 5         # Parallel workers for comment fetching
+  progress_log_interval: 10          # Log progress every N batches
+  progress_callback_interval: 5      # Progress callback frequency
+  checkpoint_slow_threshold_ms: 100  # Warn if checkpoint serialization exceeds this
+
+  # ============================================================================
+  # API CONSTANTS
+  # ============================================================================
+  api_max_results_per_page: 50       # YouTube API max results per request
+  search_pagination_limit: 10        # Max search API pages to prevent runaway
+
+  # ============================================================================
+  # CHANNEL FETCHING SETTINGS (can be overridden per-channel)
+  # ============================================================================
   # Rate limiting: requests per second to YouTube API
   requests_per_second: 2.0
 
@@ -80,8 +150,6 @@ settings:
   # Parallel workers for channel processing (1=sequential, 2-3 for faster runs)
   # Each worker creates its own DB connection and API client
   # Quota tracking uses a dedicated connection with auto-checkpointing
-  # NOTE: Turso/libsql backend auto-disables parallel workers due to thread-safety issues
-  #       Use PostgreSQL backend (DATABASE_BACKEND=postgres) for parallel processing
   channel_workers: 1
 
   # Video discovery mode:
@@ -89,12 +157,12 @@ settings:
   # - search: Always use search API (100 units/call, stops at known videos)
   # - playlist: Always use playlist API (1 unit/50 videos, fetches all, detects deletions)
   video_discovery_mode: auto
-  
+
   # Comment update frequency
   comments_update_hours: 24        # Default for older videos
   comments_update_hours_new: 6     # Default for new videos (< new_video_days old)
   new_video_days: 7                # Videos younger than this get more frequent updates
-  
+
   # Recommended constraints for large-scale tracking:
   # - Set max_video_age_days: 90-365 for ongoing analysis
   # - Set max_videos: 500-2000 for initial backfill

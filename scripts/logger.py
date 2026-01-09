@@ -4,6 +4,8 @@ Provides both console and file logging with DEBUG level for development.
 
 Supports thread-local channel context for parallel processing - each log
 line is automatically prefixed with the current channel identifier.
+
+Configuration can be set via config/channels.yaml settings section or environment variables.
 """
 
 import logging
@@ -13,6 +15,19 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+
+def _get_config_safe():
+    """
+    Safely get config without causing circular import issues.
+
+    Returns None if config cannot be loaded (e.g., during early initialization).
+    """
+    try:
+        from config import get_config
+        return get_config()
+    except Exception:
+        return None
 
 # Thread-local storage for current channel context
 _channel_context = threading.local()
@@ -54,24 +69,41 @@ class ChannelContextFormatter(logging.Formatter):
 
 
 def setup_logging(
-    log_dir: str = "logs",
+    log_dir: Optional[str] = None,
     log_level: Optional[str] = None,
     console_level: Optional[str] = None
 ) -> logging.Logger:
     """
     Set up logging with both file and console handlers.
-    
+
     Args:
-        log_dir: Directory for log files
-        log_level: Overall log level (default: DEBUG, or LOG_LEVEL env var)
-        console_level: Console output level (default: INFO, or CONSOLE_LOG_LEVEL env var)
-    
+        log_dir: Directory for log files (default: from config, env, or "logs")
+        log_level: Overall log level (default: from config, env, or "DEBUG")
+        console_level: Console output level (default: from config, env, or "INFO")
+
     Returns:
         Configured logger instance
     """
-    # Get levels from env or defaults
-    log_level = log_level or os.environ.get("LOG_LEVEL", "DEBUG")
-    console_level = console_level or os.environ.get("CONSOLE_LOG_LEVEL", "INFO")
+    # Try to get values from config first, then env, then defaults
+    cfg = _get_config_safe()
+
+    if log_dir is None:
+        if cfg:
+            log_dir = cfg.log_dir
+        else:
+            log_dir = os.environ.get("LOG_DIR", "logs")
+
+    if log_level is None:
+        if cfg:
+            log_level = cfg.log_level
+        else:
+            log_level = os.environ.get("LOG_LEVEL", "DEBUG")
+
+    if console_level is None:
+        if cfg:
+            console_level = cfg.console_log_level
+        else:
+            console_level = os.environ.get("CONSOLE_LOG_LEVEL", "INFO")
     
     # Create logs directory
     Path(log_dir).mkdir(parents=True, exist_ok=True)
