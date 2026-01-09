@@ -80,7 +80,8 @@ settings:
   # Parallel workers for channel processing (1=sequential, 2-3 for faster runs)
   # Each worker creates its own DB connection and API client
   # Quota tracking uses a dedicated connection with auto-checkpointing
-  channel_workers: 2
+  # NOTE: Set to 1 due to libsql thread-safety issues (memory corruption with >1 worker)
+  channel_workers: 1
 
   # Video discovery mode:
   # - auto: Use search API for incremental updates, playlist for backfill (default)
