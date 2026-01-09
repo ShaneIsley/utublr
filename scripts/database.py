@@ -544,7 +544,8 @@ def get_videos_needing_comments(
     conn,
     channel_id: str,
     refresh_tiers: list[dict] = None,
-    limit: int = None
+    limit: int = None,
+    min_new_comments: int = 0
 ) -> list[str]:
     """
     Get video IDs that need comment updates.
@@ -566,6 +567,8 @@ def get_videos_needing_comments(
                           {'max_age_days': None, 'refresh_hours': 168}  # 30d+: every 7 days
                       ]
         limit: Maximum total videos to return (default: None = unlimited)
+        min_new_comments: Minimum number of new comments required to fetch (default: 0 = all videos)
+                         Set to 10 to skip videos with < 10 new comments since last fetch
 
     Returns:
         List of video IDs needing comment updates, newest first
@@ -623,6 +626,7 @@ def get_videos_needing_comments(
         ) stored ON v.video_id = stored.video_id
         WHERE v.channel_id = ?
         AND COALESCE(vs.comment_count, 0) > COALESCE(stored.stored_count, 0)
+        AND (COALESCE(vs.comment_count, 0) - COALESCE(stored.stored_count, 0)) >= ?
         AND (
             stored.last_fetch IS NULL
             OR datetime(stored.last_fetch) < datetime('now', '-' || ({refresh_hours_case}) || ' hours')
@@ -632,7 +636,7 @@ def get_videos_needing_comments(
     if limit is not None:
         query += f" LIMIT {limit}"
 
-    videos = conn.execute(query, (channel_id,)).fetchall()
+    videos = conn.execute(query, (channel_id, min_new_comments)).fetchall()
     video_ids = [row[0] for row in videos]
 
     # Log tier breakdown for debugging
