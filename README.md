@@ -272,6 +272,38 @@ fetch_progress  -- Resume checkpoints
 quota_usage     -- API quota tracking
 ```
 
+## Database Backends
+
+The fetcher supports two database backends:
+
+### Turso (Default)
+Cloud-hosted SQLite with edge replication. **Only supports sequential processing** (1 channel at a time).
+
+> ⚠️ **Note:** Turso's libsql-experimental native library has thread-safety issues that cause
+> heap corruption when using parallel workers. The fetcher automatically forces `channel_workers=1`
+> when using Turso. Use PostgreSQL if you need parallel channel processing.
+
+```bash
+export DATABASE_BACKEND=turso  # or omit (default)
+export TURSO_DATABASE_URL=libsql://your-db.turso.io
+export TURSO_AUTH_TOKEN=your-token
+```
+
+### PostgreSQL
+Traditional database with excellent concurrency. **Recommended for parallel workers.**
+
+```bash
+export DATABASE_BACKEND=postgres
+export POSTGRES_URL=postgresql://user:pass@host:5432/dbname
+```
+
+PostgreSQL handles concurrent connections much better than Turso's Hrana protocol,
+making it ideal when using `channel_workers > 1`.
+
+**Free PostgreSQL hosting options:**
+- [Neon](https://neon.tech) - Serverless Postgres, generous free tier
+- [Supabase](https://supabase.com) - Postgres with extras, 500MB free
+
 ## Parallel Processing
 
 The fetcher supports parallel processing at two levels for faster runs:
@@ -301,12 +333,17 @@ settings:
 
 ### Thread-Safety Design
 
-The system uses several strategies to ensure thread-safety with Turso/libsql:
+**With PostgreSQL (recommended for parallel):**
+PostgreSQL handles concurrent connections natively. Full parallel processing supported.
 
-1. **Per-worker connections**: Each channel worker creates its own database connection
-2. **Fresh connections for quota saves**: Quota persistence creates a new connection per save to avoid libsql's C library thread-safety issues
-3. **Separate locks**: Quota tracking uses separate locks for fast state updates vs slower DB operations
-4. **Auto-checkpointing**: Quota state saves every 500 units spent, plus at phase transitions
+**With Turso/libsql:**
+Turso's native library (`libsql-experimental`) has thread-safety issues at the C memory allocator level,
+causing heap corruption when used with multiple threads. **Parallel channel workers are automatically
+disabled** when using Turso. Comment workers within a single channel still work since they share one connection.
+
+Turso-specific features:
+- **Connection refresh**: Automatic reconnection on "stream not found" errors
+- **Auto-checkpointing**: Quota state saves every 500 units + at phase transitions
 
 ## API Quota Management
 
