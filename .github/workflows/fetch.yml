@@ -26,6 +26,11 @@ on:
         required: false
         type: boolean
         default: false
+      min_new_comments:
+        description: 'Skip videos with fewer than N new comments (default: 10, set to 0 to disable)'
+        required: false
+        type: number
+        default: 10
       reset_quota:
         description: 'Reset quota counter (use if quota tracking was corrupted)'
         required: false
@@ -110,7 +115,11 @@ jobs:
           if [ "${{ github.event.inputs.skip_comments }}" == "true" ]; then
             CMD="$CMD --skip-comments"
           fi
-          
+
+          if [ -n "${{ github.event.inputs.min_new_comments }}" ]; then
+            CMD="$CMD --min-new-comments ${{ github.event.inputs.min_new_comments }}"
+          fi
+
           if [ "${{ github.event.inputs.reset_quota }}" == "true" ]; then
             CMD="$CMD --reset-quota"
           fi

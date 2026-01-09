@@ -9,6 +9,10 @@
 # - max_videos: Limit videos to fetch (most recent first)
 # - max_video_age_days: Only fetch videos within this many days
 # - fetch_comments: true/false (default: true)
+# - max_comment_videos: Max videos to fetch comments for per run (default: 200)
+# - max_comments_per_video: Max comments per video (default: 100)
+# - min_new_comments: Skip videos with < N new comments (default: 10, set 0 to disable)
+# - comment_workers: Parallel workers for comment fetching (default: 5)
 # - video_discovery_mode: auto/search/playlist (default: auto)
 # - comments_update_hours: Hours before re-fetching comments (default: 24)
 # - comments_update_hours_new: Hours for videos < 7 days old (default: 6)
@@ -36,35 +40,42 @@ channels:
   
   # Detailed format with options
   # - identifier: "@mkbhd"
-  #   max_videos: 500           # Only most recent 500 videos
-  #   max_video_age_days: 365   # Only videos from last year
+  #   max_videos: 500                # Only most recent 500 videos
+  #   max_video_age_days: 365        # Only videos from last year
   #   fetch_comments: true
-  #   video_discovery_mode: auto  # auto, search, or playlist
+  #   max_comment_videos: 200        # Max videos to fetch comments for per run
+  #   max_comments_per_video: 100    # Max comments per video
+  #   min_new_comments: 10           # Skip videos with < 10 new comments
+  #   comment_workers: 5             # Parallel workers for comments
+  #   video_discovery_mode: auto     # auto, search, or playlist
   #   comments_update_hours: 24      # Re-check comments every 24h for older videos
   #   comments_update_hours_new: 4   # Re-check every 4h for new videos
   #   new_video_days: 7              # Videos < 7 days old are "new"
   
+  # For high-engagement channels, limit comment scope to reduce runtime:
+  # - identifier: "@podsaveamerica"
+  #   max_comment_videos: 50         # Only fetch comments for 50 most recent videos
+  #   max_comments_per_video: 50     # Cap at 50 comments per video
+  #   min_new_comments: 20           # Skip videos with < 20 new comments
+  #   comment_workers: 8             # Use more workers for faster processing
+
   # For very large/prolific channels, force playlist mode to detect deletions:
   # - identifier: "@TheMajorityReport"
   #   max_videos: 1000
-  #   max_video_age_days: 90    # Only last 90 days
-  #   video_discovery_mode: playlist  # Always use playlist (detects deletions)
-  #   fetch_comments: false     # Skip comments to save quota
+  #   max_video_age_days: 90         # Only last 90 days
+  #   video_discovery_mode: playlist # Always use playlist (detects deletions)
+  #   fetch_comments: false          # Skip comments to save quota
 
 # Global settings (can be overridden per-channel)
 settings:
   # Rate limiting: requests per second to YouTube API
   requests_per_second: 2.0
-  
-  # Default max comments per video
-  max_comments_per_video: 500
-  
-  # Max videos to fetch comments for per channel per run
-  # Prevents extremely long runs on large channels
-  max_comment_videos: 200
-  
-  # Parallel workers for comment fetching (1=sequential, 3-5 recommended)
-  comment_workers: 3
+
+  # Comment fetching settings
+  max_comments_per_video: 100        # Max comments per video (matches 1 API call)
+  max_comment_videos: 200            # Max videos to fetch comments for per run
+  min_new_comments: 10               # Skip videos with < N new comments (0 = disabled)
+  comment_workers: 5                 # Parallel workers for comment fetching
 
   # Parallel workers for channel processing (1=sequential, 2-3 for faster runs)
   # Each worker creates its own DB connection and API client
@@ -85,4 +96,5 @@ settings:
   # Recommended constraints for large-scale tracking:
   # - Set max_video_age_days: 90-365 for ongoing analysis
   # - Set max_videos: 500-2000 for initial backfill
-  # - Use fetch_comments: false for channels with high volume
+  # - For high-engagement channels: lower max_comment_videos and increase min_new_comments
+  # - Use fetch_comments: false for channels with very high comment volume

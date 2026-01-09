@@ -76,7 +76,7 @@ from quota import QuotaTracker, QuotaExhaustedError
 # Configuration constants
 DEFAULT_BATCH_SIZE = 10  # Small batches for safety with popular videos
 MAX_RUNTIME_MINUTES = 300  # 5 hours default
-DEFAULT_COMMENT_WORKERS = 3  # Conservative default for parallel comment fetching
+DEFAULT_COMMENT_WORKERS = 5  # Parallel workers for comment fetching
 PROGRESS_LOG_INTERVAL = 10  # Log progress every N batches
 PROGRESS_CALLBACK_INTERVAL = 5  # Call progress callback every N videos
 
@@ -254,6 +254,7 @@ def fetch_channel_data(
     backfill: bool = False,
     start_time: float = None,
     max_runtime_minutes: int = MAX_RUNTIME_MINUTES,
+    min_new_comments: int = 0,
 ) -> dict:
     """
     Fetch all data for a single channel with smart incremental updates.
@@ -274,6 +275,8 @@ def fetch_channel_data(
         max_comments_per_video: Max comment threads per video (default: 500)
         max_comment_videos: Max videos to fetch comments for per run (default: 200)
         max_stats_videos: Max videos to refresh stats for per run (default: 500)
+        min_new_comments: Skip videos with fewer than this many new comments (default: 0)
+                         Set to 10 to skip low-engagement videos and reduce API calls
         playlists_update_hours: Hours between playlist refresh (default: 24)
         comments_refresh_tiers: List of {'max_age_days': N, 'refresh_hours': M} for comments
                                Default: [{'max_age_days': 2, 'refresh_hours': 6},
@@ -401,10 +404,11 @@ def fetch_channel_data(
             # Still do comments for videos that need them
             if fetch_comments:
                 videos_for_comments = get_videos_needing_comments(
-                    conn, 
-                    channel_id, 
+                    conn,
+                    channel_id,
                     refresh_tiers=comments_refresh_tiers,
-                    limit=max_comment_videos
+                    limit=max_comment_videos,
+                    min_new_comments=min_new_comments
                 )
                 
                 if videos_for_comments:
@@ -715,10 +719,11 @@ def fetch_channel_data(
                 log.info(f"Backfill: fetching comments for {len(videos_for_comments)} videos (limited to {max_comment_videos})")
             else:
                 videos_for_comments = get_videos_needing_comments(
-                    conn, 
-                    channel_id, 
+                    conn,
+                    channel_id,
                     refresh_tiers=comments_refresh_tiers,
-                    limit=max_comment_videos
+                    limit=max_comment_videos,
+                    min_new_comments=min_new_comments
                 )
             
             if videos_for_comments:
@@ -876,7 +881,7 @@ def dry_run_channel(
     # Check existing data
     existing_video_ids = get_existing_video_ids(conn, channel_id)
     videos_without_transcripts = get_videos_without_transcripts(conn, channel_id)
-    videos_needing_comments = get_videos_needing_comments(conn, channel_id) if fetch_comments else []
+    videos_needing_comments = get_videos_needing_comments(conn, channel_id, min_new_comments=0) if fetch_comments else []
     
     log.info(f"")
     log.info(f"CURRENT DATABASE STATE:")
@@ -990,6 +995,12 @@ def main():
         help="Maximum videos to fetch comments for per run (default: 200, prevents extremely long runs)"
     )
     parser.add_argument(
+        "--min-new-comments",
+        type=int,
+        default=10,
+        help="Skip videos with fewer than this many new comments since last fetch (default: 10, set to 0 to disable)"
+    )
+    parser.add_argument(
         "--video-discovery-mode",
         type=str,
         choices=["auto", "search", "playlist"],
@@ -1013,7 +1024,7 @@ def main():
         "--comment-workers",
         type=int,
         default=DEFAULT_COMMENT_WORKERS,
-        help=f"Parallel workers for comment fetching (default: {DEFAULT_COMMENT_WORKERS}, use 1 to disable)"
+        help=f"Parallel workers for comment fetching (default: {DEFAULT_COMMENT_WORKERS})"
     )
     parser.add_argument(
         "--channel-workers",
@@ -1210,6 +1221,7 @@ def main():
                 max_comments_per_video=get_option("max_comments_per_video", args.max_comments),
                 max_replies_per_comment=get_option("max_replies_per_comment", args.max_replies),
                 max_comment_videos=get_option("max_comment_videos", args.max_comment_videos),
+                min_new_comments=get_option("min_new_comments", args.min_new_comments),
                 comment_workers=get_option("comment_workers", args.comment_workers),
                 video_discovery_mode=get_option("video_discovery_mode", args.video_discovery_mode),
                 batch_size=args.batch_size,
