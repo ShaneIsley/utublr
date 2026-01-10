@@ -403,6 +403,14 @@ class PostgresConnection:
                         raise
                 else:
                     log.error(f"Non-retryable PostgreSQL error: {e}")
+                    # Rollback to reset connection state after non-retryable error
+                    # This prevents "current transaction is aborted" cascading failures
+                    try:
+                        if self._conn:
+                            self._conn.rollback()
+                            log.debug("Transaction rolled back after non-retryable error")
+                    except Exception as rollback_err:
+                        log.warning(f"Rollback after error failed: {rollback_err}")
                     raise
 
         raise last_exception
@@ -415,6 +423,15 @@ class PostgresConnection:
     def commit(self):
         """Commit transaction with automatic retry."""
         return self._execute_with_retry("commit")
+
+    def rollback(self):
+        """Rollback the current transaction to reset connection state."""
+        with self._lock:
+            if self._conn:
+                try:
+                    self._conn.rollback()
+                except Exception as e:
+                    log.warning(f"Rollback failed: {e}")
 
     def executemany(self, sql: str, parameters_list: list):
         """Execute SQL with multiple parameter sets (batch operation)."""
