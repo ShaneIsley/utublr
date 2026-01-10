@@ -146,9 +146,16 @@ jobs:
         run: |
           # Determine destination URL
           if [ "$DEST_TYPE" == "Supabase" ]; then
-            DEST_URL="$SUPABASE_URL"
+            # Fallback to POSTGRES_URL if SUPABASE_URL is not set
+            DEST_URL="${SUPABASE_URL:-$POSTGRES_URL}"
           else
             DEST_URL="$POSTGRES_URL"
+          fi
+
+          # Validate we have a destination URL
+          if [ -z "$DEST_URL" ]; then
+            echo "Error: No destination URL configured. Set SUPABASE_URL or POSTGRES_URL secret."
+            exit 1
           fi
 
           # Build table filter if specified
