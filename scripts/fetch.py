@@ -1246,7 +1246,7 @@ def main():
 
         # For parallel processing, create dedicated fetcher and connection per thread
         if args.channel_workers > 1:
-            thread_fetcher = YouTubeFetcher(api_key)
+            thread_fetcher = YouTubeFetcher(fetcher.api_key)
             thread_conn = get_connection()
         else:
             thread_fetcher = fetcher
