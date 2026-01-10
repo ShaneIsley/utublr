@@ -1246,7 +1246,7 @@ def main():
 
         # For parallel processing, create dedicated fetcher and connection per thread
         if args.channel_workers > 1:
-            thread_fetcher = YouTubeFetcher(api_key)
+            thread_fetcher = YouTubeFetcher(fetcher.api_key)
             thread_conn = get_connection()
         else:
             thread_fetcher = fetcher
@@ -1307,12 +1307,14 @@ def main():
     global_settings = config.get("settings", {})
     channel_workers = args.channel_workers if args.channel_workers != 1 else global_settings.get("channel_workers", 1)
 
-    # IMPORTANT: Turso's libsql-experimental native library is NOT thread-safe
-    # Using parallel workers with Turso causes heap corruption ("malloc(): unsorted double linked list corrupted")
-    # Force sequential processing for Turso; PostgreSQL handles parallelization properly
-    if channel_workers > 1 and not is_postgres():
-        log.warning("Turso backend does not support parallel workers (native library thread-safety issue)")
-        log.warning("Forcing sequential processing. Use PostgreSQL backend for parallel channel processing.")
+    # IMPORTANT: Parallel channel workers are disabled due to thread-safety issues
+    # in httplib2/SSL (used by google-api-python-client). When multiple threads
+    # encounter SSL errors simultaneously, it causes "double free or corruption" crashes.
+    # This affects both Turso and PostgreSQL backends.
+    # Note: Comment workers within a single channel are still parallel and safe.
+    if channel_workers > 1:
+        log.warning("Parallel channel workers disabled due to httplib2/SSL thread-safety issues")
+        log.warning("Processing channels sequentially. Comment fetching remains parallel.")
         channel_workers = 1
 
     if channel_workers > 1:
