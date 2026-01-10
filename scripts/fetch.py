@@ -29,11 +29,14 @@ from typing import Callable, Optional
 
 import yaml
 
-# Initialize logging first
+# Initialize config first so logging can use it
+from config import get_config
+
+# Initialize logging with config
 from logger import setup_logging, get_logger, LogContext, set_channel_context, clear_channel_context
 
-# Set up logging before other imports
-logger = setup_logging(log_dir="logs")
+# Set up logging before other imports (will use config values)
+logger = setup_logging()
 log = get_logger("fetch")
 
 from database import (
@@ -74,12 +77,26 @@ from youtube_api import YouTubeFetcher
 from quota import QuotaTracker, QuotaExhaustedError
 
 
-# Configuration constants
-DEFAULT_BATCH_SIZE = 10  # Small batches for safety with popular videos
-MAX_RUNTIME_MINUTES = 300  # 5 hours default
-DEFAULT_COMMENT_WORKERS = 5  # Parallel workers for comment fetching
-PROGRESS_LOG_INTERVAL = 10  # Log progress every N batches
-PROGRESS_CALLBACK_INTERVAL = 5  # Call progress callback every N videos
+# Configuration helper functions (values loaded from config module)
+def get_default_batch_size() -> int:
+    """Get default batch size from config."""
+    return get_config().default_batch_size
+
+def get_max_runtime_minutes() -> int:
+    """Get max runtime minutes from config."""
+    return get_config().max_runtime_minutes
+
+def get_default_comment_workers() -> int:
+    """Get default comment workers from config."""
+    return get_config().default_comment_workers
+
+def get_progress_log_interval() -> int:
+    """Get progress log interval from config."""
+    return get_config().progress_log_interval
+
+def get_progress_callback_interval() -> int:
+    """Get progress callback interval from config."""
+    return get_config().progress_callback_interval
 
 
 def load_config(config_path: str) -> dict:
@@ -98,7 +115,7 @@ def fetch_comments_parallel(
     video_ids: list[str],
     max_comments_per_video: int,
     backfill: bool,
-    num_workers: int = DEFAULT_COMMENT_WORKERS,
+    num_workers: int = None,
     max_replies_per_comment: int = 10,
     progress_callback: Optional[Callable[[int, int, int], None]] = None,
 ) -> tuple[int, int, list[str]]:
@@ -121,9 +138,13 @@ def fetch_comments_parallel(
     Returns:
         Tuple of (total_comments, new_comments, errors)
     """
+    # Use config defaults if not specified
+    if num_workers is None:
+        num_workers = get_default_comment_workers()
+
     if not video_ids:
         return 0, 0, []
-    
+
     # Thread-safe counters
     lock = threading.Lock()
     total_comments = 0
@@ -217,7 +238,7 @@ def fetch_comments_parallel(
                     processed += 1
 
                     # Progress callback
-                    if progress_callback and processed % PROGRESS_CALLBACK_INTERVAL == 0:
+                    if progress_callback and processed % get_progress_callback_interval() == 0:
                         progress_callback(processed, len(video_ids), new_comments)
 
             except (KeyboardInterrupt, SystemExit):
@@ -245,16 +266,16 @@ def fetch_channel_data(
     max_replies_per_comment: int = 10,
     max_comment_videos: int = 200,
     max_stats_videos: int = 500,
-    comment_workers: int = DEFAULT_COMMENT_WORKERS,
+    comment_workers: int = None,
     stats_update_hours: int = 6,
     playlists_update_hours: int = 24,
     comments_refresh_tiers: list[dict] = None,
     stats_refresh_tiers: list[dict] = None,
     video_discovery_mode: str = "auto",
-    batch_size: int = DEFAULT_BATCH_SIZE,
+    batch_size: int = None,
     backfill: bool = False,
     start_time: float = None,
-    max_runtime_minutes: int = MAX_RUNTIME_MINUTES,
+    max_runtime_minutes: int = None,
     min_new_comments: int = 0,
 ) -> dict:
     """
@@ -293,6 +314,14 @@ def fetch_channel_data(
     Returns:
         Dict with counts of fetched items and status.
     """
+    # Use config defaults if not specified
+    if comment_workers is None:
+        comment_workers = get_default_comment_workers()
+    if batch_size is None:
+        batch_size = get_default_batch_size()
+    if max_runtime_minutes is None:
+        max_runtime_minutes = get_max_runtime_minutes()
+
     # Default refresh tiers
     if comments_refresh_tiers is None:
         comments_refresh_tiers = [
@@ -621,7 +650,7 @@ def fetch_channel_data(
                                      processed_ids, len(video_ids_to_fetch))
                     
                     # Progress every N batches or at end
-                    if batch_num % PROGRESS_LOG_INTERVAL == 0 or batch_num == num_batches:
+                    if batch_num % get_progress_log_interval() == 0 or batch_num == num_batches:
                         log.info(f"Video progress: {batch_num}/{num_batches} batches, "
                                 f"{len(processed_ids)}/{len(video_ids_to_fetch)} videos, "
                                 f"quota: {quota.remaining()} remaining")
@@ -678,7 +707,7 @@ def fetch_channel_data(
                                 all_stats_to_insert.append((video["video_id"], video["statistics"]))
                             
                             # Progress every N batches or at end
-                            if batch_num % PROGRESS_LOG_INTERVAL == 0 or batch_num == total_batches:
+                            if batch_num % get_progress_log_interval() == 0 or batch_num == total_batches:
                                 log.info(f"Stats progress: {batch_num}/{total_batches} batches, "
                                         f"{len(all_stats_to_insert)} videos fetched")
                                 
@@ -1010,10 +1039,10 @@ def main():
              "search (100 units/call, stops at known), playlist (1 unit/50 videos, fetches all)"
     )
     parser.add_argument(
-   "--batch-size",
+        "--batch-size",
         type=int,
-        default=DEFAULT_BATCH_SIZE,
-        help=f"Videos to process per batch/commit (default: {DEFAULT_BATCH_SIZE})"
+        default=None,
+        help="Videos to process per batch/commit (default: from config)"
     )
     parser.add_argument(
         "--stats-update-hours",
@@ -1024,20 +1053,20 @@ def main():
     parser.add_argument(
         "--comment-workers",
         type=int,
-        default=DEFAULT_COMMENT_WORKERS,
-        help=f"Parallel workers for comment fetching (default: {DEFAULT_COMMENT_WORKERS})"
+        default=None,
+        help="Parallel workers for comment fetching (default: from config)"
     )
     parser.add_argument(
         "--channel-workers",
         type=int,
-        default=1,
-        help="Parallel workers for channel processing (default: 1, use 2-3 for faster runs)"
+        default=None,
+        help="Parallel workers for channel processing (default: from config, 1=sequential)"
     )
     parser.add_argument(
         "--max-runtime-minutes",
         type=int,
-        default=MAX_RUNTIME_MINUTES,
-        help=f"Stop fetching after this many minutes (default: {MAX_RUNTIME_MINUTES})"
+        default=None,
+        help="Stop fetching after this many minutes (default: from config)"
     )
     parser.add_argument(
         "--skip-comments",
@@ -1047,8 +1076,8 @@ def main():
     parser.add_argument(
         "--quota-limit",
         type=int,
-        default=10000,
-        help="Daily API quota limit (default: 10000)"
+        default=None,
+        help="Daily API quota limit (default: from config)"
     )
     parser.add_argument(
         "--reset-quota",
@@ -1058,13 +1087,26 @@ def main():
     
     args = parser.parse_args()
     
+    # Resolve config defaults for arguments that weren't specified
+    cfg = get_config()
+    if args.batch_size is None:
+        args.batch_size = cfg.default_batch_size
+    if args.comment_workers is None:
+        args.comment_workers = cfg.default_comment_workers
+    if args.channel_workers is None:
+        args.channel_workers = 1  # Default from config settings section
+    if args.max_runtime_minutes is None:
+        args.max_runtime_minutes = cfg.max_runtime_minutes
+    if args.quota_limit is None:
+        args.quota_limit = cfg.quota_limit
+
     log.info("="*60)
     log.info("YouTube Metadata Fetcher Starting")
     log.info("="*60)
     log.debug(f"Arguments: {vars(args)}")
-    
+
     start_time = time.time()
-    
+
     # Initialize database
     log.info("Connecting to database...")
     conn = get_connection()
