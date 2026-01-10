@@ -147,10 +147,11 @@ settings:
   min_new_comments: 10               # Skip videos with < N new comments (0 = disabled)
   comment_workers: 5                 # Parallel workers for comment fetching
 
-  # Parallel workers for channel processing (1=sequential, 2-3 for faster runs)
-  # Each worker creates its own DB connection and API client
-  # Quota tracking uses a dedicated connection with auto-checkpointing
-  channel_workers: 5
+  # Parallel workers for channel processing (1=sequential)
+  # IMPORTANT: Keep at 1 - httplib2/SSL has thread-safety issues that cause
+  # "double free or corruption" crashes when multiple threads hit SSL errors.
+  # Comment workers within a single channel are still parallel and safe.
+  channel_workers: 1
 
   # Video discovery mode:
   # - auto: Use search API for incremental updates, playlist for backfill (default)
