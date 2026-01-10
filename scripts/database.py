@@ -349,10 +349,10 @@ class PostgresConnection:
             flags=re.IGNORECASE
         )
 
-        # datetime(column) -> column (PostgreSQL doesn't need datetime wrapper)
+        # datetime(column) -> column::timestamp (cast TEXT to timestamp for comparisons)
         result = re.sub(
             r"datetime\s*\(\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*\)",
-            r"\1",
+            r"\1::timestamp",
             result
         )
 
@@ -1057,15 +1057,15 @@ def get_videos_needing_comments(
 
         if max_age is None:
             # Last tier
-            case_parts.append(f"WHEN v.published_at < datetime('now', '-{min_age} days') THEN {refresh_hours}")
+            case_parts.append(f"WHEN datetime(v.published_at) < datetime('now', '-{min_age} days') THEN {refresh_hours}")
         elif min_age == 0:
             # First tier
-            case_parts.append(f"WHEN v.published_at >= datetime('now', '-{max_age} days') THEN {refresh_hours}")
+            case_parts.append(f"WHEN datetime(v.published_at) >= datetime('now', '-{max_age} days') THEN {refresh_hours}")
         else:
             # Middle tier
             case_parts.append(
-                f"WHEN v.published_at < datetime('now', '-{min_age} days') "
-                f"AND v.published_at >= datetime('now', '-{max_age} days') THEN {refresh_hours}"
+                f"WHEN datetime(v.published_at) < datetime('now', '-{min_age} days') "
+                f"AND datetime(v.published_at) >= datetime('now', '-{max_age} days') THEN {refresh_hours}"
             )
 
     refresh_hours_case = "CASE " + " ".join(case_parts) + " ELSE 168 END"
@@ -1166,15 +1166,15 @@ def get_videos_needing_stats_update(
 
         if max_age is None:
             # Last tier
-            case_parts.append(f"WHEN v.published_at < datetime('now', '-{min_age} days') THEN {refresh_hours}")
+            case_parts.append(f"WHEN datetime(v.published_at) < datetime('now', '-{min_age} days') THEN {refresh_hours}")
         elif min_age == 0:
             # First tier
-            case_parts.append(f"WHEN v.published_at >= datetime('now', '-{max_age} days') THEN {refresh_hours}")
+            case_parts.append(f"WHEN datetime(v.published_at) >= datetime('now', '-{max_age} days') THEN {refresh_hours}")
         else:
             # Middle tier
             case_parts.append(
-                f"WHEN v.published_at < datetime('now', '-{min_age} days') "
-                f"AND v.published_at >= datetime('now', '-{max_age} days') THEN {refresh_hours}"
+                f"WHEN datetime(v.published_at) < datetime('now', '-{min_age} days') "
+                f"AND datetime(v.published_at) >= datetime('now', '-{max_age} days') THEN {refresh_hours}"
             )
 
     refresh_hours_case = "CASE " + " ".join(case_parts) + " ELSE 24 END"
