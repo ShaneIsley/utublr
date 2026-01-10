@@ -101,6 +101,10 @@ jobs:
         id: fetch
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          # Database - uses PostgreSQL/Supabase (set DATABASE_BACKEND=postgres)
+          DATABASE_BACKEND: postgres
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          # Legacy Turso vars (kept for fallback)
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           CONSOLE_LOG_LEVEL: ${{ github.event.inputs.log_level || 'INFO' }}
@@ -146,6 +150,8 @@ jobs:
       - name: Generate summary report
         if: always()
         env:
+          DATABASE_BACKEND: postgres
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
         run: |
