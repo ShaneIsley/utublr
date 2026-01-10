@@ -6,6 +6,8 @@ Features:
 - Retry with exponential backoff for transient errors
 - Rate limiting between requests
 - Data validation
+
+Configuration is loaded from config/channels.yaml settings section or environment variables.
 """
 
 import os
@@ -22,36 +24,54 @@ import requests
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from config import get_config
 from logger import get_logger
 
 log = get_logger("youtube_api")
 
 
 # ============================================================================
-# CONSTANTS
+# CONSTANTS & CONFIG HELPERS
 # ============================================================================
 
-# YouTube API limits
-API_MAX_RESULTS_PER_PAGE = 50  # Maximum items per API request
-SEARCH_PAGINATION_LIMIT = 10  # Max search API pages to prevent runaway pagination
-PROGRESS_LOG_INTERVAL = 10  # Log progress every N pages
-
-# Retry logic with exponential backoff
+# Retry status codes (fixed, not configurable)
 RETRYABLE_STATUS_CODES = (429, 500, 502, 503, 504)
-MAX_RETRIES = 3
-BASE_DELAY = 1.0
-MAX_DELAY = 60.0
+
+# Config helper functions
+def get_api_max_results_per_page() -> int:
+    """Get max results per page from config."""
+    return get_config().api_max_results_per_page
+
+def get_search_pagination_limit() -> int:
+    """Get search pagination limit from config."""
+    return get_config().search_pagination_limit
+
+def get_progress_log_interval() -> int:
+    """Get progress log interval from config."""
+    return get_config().progress_log_interval
+
+def get_api_max_retries() -> int:
+    """Get API max retries from config."""
+    return get_config().api_max_retries
+
+def get_api_base_delay() -> float:
+    """Get API base delay from config."""
+    return get_config().api_base_delay
+
+def get_api_max_delay() -> float:
+    """Get API max delay from config."""
+    return get_config().api_max_delay
 
 
 def retry_with_backoff(
-    max_retries: int = MAX_RETRIES,
-    base_delay: float = BASE_DELAY,
-    max_delay: float = MAX_DELAY,
+    max_retries: int = None,
+    base_delay: float = None,
+    max_delay: float = None,
     exponential_base: float = 2.0,
 ):
     """
     Decorator for retrying functions with exponential backoff.
-    
+
     Retries on:
     - HTTP 429 (rate limit)
     - HTTP 5xx (server errors)
@@ -60,20 +80,25 @@ def retry_with_backoff(
     def decorator(func: Callable):
         @wraps(func)
         def wrapper(*args, **kwargs):
+            # Get config values if not specified (allows runtime config)
+            _max_retries = max_retries if max_retries is not None else get_api_max_retries()
+            _base_delay = base_delay if base_delay is not None else get_api_base_delay()
+            _max_delay = max_delay if max_delay is not None else get_api_max_delay()
+
             last_exception = None
-            
-            for attempt in range(max_retries + 1):
+
+            for attempt in range(_max_retries + 1):
                 try:
                     return func(*args, **kwargs)
-                    
+
                 except HttpError as e:
                     status_code = e.resp.status if hasattr(e, 'resp') else None
-                    
+
                     if status_code in RETRYABLE_STATUS_CODES:
                         last_exception = e
-                        if attempt < max_retries:
-                            delay = min(base_delay * (exponential_base ** attempt), max_delay)
-                            
+                        if attempt < _max_retries:
+                            delay = min(_base_delay * (exponential_base ** attempt), _max_delay)
+
                             # Check for Retry-After header
                             retry_after = e.resp.get('retry-after') if hasattr(e, 'resp') else None
                             if retry_after:
@@ -81,16 +106,16 @@ def retry_with_backoff(
                                     delay = max(delay, float(retry_after))
                                 except ValueError:
                                     pass
-                            
+
                             log.warning(f"HTTP {status_code} error, retrying in {delay:.1f}s "
-                                       f"(attempt {attempt + 1}/{max_retries + 1}): {e}")
+                                       f"(attempt {attempt + 1}/{_max_retries + 1}): {e}")
                             time.sleep(delay)
                             continue
                     else:
                         # Non-retryable HTTP error
                         log.error(f"Non-retryable HTTP error {status_code}: {e}")
                         raise
-                        
+
                 except (requests.exceptions.ConnectionError,
                         requests.exceptions.Timeout,
                         ConnectionResetError,
@@ -101,22 +126,22 @@ def retry_with_backoff(
                     # OSError catches low-level network errors including SSLEOFError
                     # AttributeError catches httplib2 thread-safety issues ('NoneType' has no attribute 'read')
                     last_exception = e
-                    if attempt < max_retries:
-                        delay = min(base_delay * (exponential_base ** attempt), max_delay)
+                    if attempt < _max_retries:
+                        delay = min(_base_delay * (exponential_base ** attempt), _max_delay)
                         log.warning(f"Connection error, retrying in {delay:.1f}s "
-                                   f"(attempt {attempt + 1}/{max_retries + 1}): {type(e).__name__}: {e}")
+                                   f"(attempt {attempt + 1}/{_max_retries + 1}): {type(e).__name__}: {e}")
                         time.sleep(delay)
                         continue
-                    
+
                 except Exception as e:
                     # Non-retryable exception
                     log.error(f"Non-retryable error in {func.__name__}: {type(e).__name__}: {e}")
                     raise
-            
+
             # All retries exhausted
-            log.error(f"All {max_retries + 1} attempts failed for {func.__name__}")
+            log.error(f"All {_max_retries + 1} attempts failed for {func.__name__}")
             raise last_exception
-        
+
         return wrapper
     return decorator
 
@@ -291,7 +316,7 @@ class YouTubeFetcher:
         request = self.youtube.playlistItems().list(
             part="contentDetails",
             playlistId=playlist_id,
-            maxResults=API_MAX_RESULTS_PER_PAGE,
+            maxResults=get_api_max_results_per_page(),
             pageToken=page_token
         )
         return request.execute()
@@ -319,7 +344,7 @@ class YouTubeFetcher:
             if not next_page_token:
                 break
             
-            if page_count % PROGRESS_LOG_INTERVAL == 0:
+            if page_count % get_progress_log_interval() == 0:
                 log.debug(f"Playlist fetch progress: {len(video_ids)} videos, page {page_count}")
         
         log.debug(f"Fetched {len(video_ids)} video IDs from playlist in {page_count} pages")
@@ -340,7 +365,7 @@ class YouTubeFetcher:
             "channelId": channel_id,
             "type": "video",
             "order": "date",
-            "maxResults": API_MAX_RESULTS_PER_PAGE,
+            "maxResults": get_api_max_results_per_page(),
         }
         
         if published_after:
@@ -416,7 +441,7 @@ class YouTubeFetcher:
                 break
                 
             # Safety limit - don't paginate forever
-            if api_calls >= SEARCH_PAGINATION_LIMIT:
+            if api_calls >= get_search_pagination_limit():
                 log.warning(f"Search pagination limit reached ({api_calls} calls), stopping")
                 break
         
@@ -697,7 +722,7 @@ class YouTubeFetcher:
         request = self.youtube.playlists().list(
             part="snippet,contentDetails,status",
             channelId=channel_id,
-            maxResults=API_MAX_RESULTS_PER_PAGE,
+            maxResults=get_api_max_results_per_page(),
             pageToken=page_token
         )
         return request.execute()

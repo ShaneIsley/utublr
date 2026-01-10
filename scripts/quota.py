@@ -6,6 +6,8 @@ This module tracks usage and prevents exceeding limits.
 
 Quota state is persisted to the database to track usage across runs.
 Thread-safe for parallel channel processing with dedicated connection.
+
+Configuration is loaded from config/channels.yaml settings section or environment variables.
 """
 
 import json
@@ -14,6 +16,7 @@ import threading
 from datetime import datetime, date
 from typing import Optional
 
+from config import get_config
 from logger import get_logger
 
 log = get_logger("quota")
@@ -53,23 +56,24 @@ class QuotaTracker:
     def __init__(
         self,
         daily_limit: int = None,
-        warn_threshold: float = 0.8,  # Warn at 80% usage
-        abort_threshold: float = 0.95,  # Abort at 95% usage
-        checkpoint_threshold: int = 500,  # Auto-save every N quota units
+        warn_threshold: float = None,
+        abort_threshold: float = None,
+        checkpoint_threshold: int = None,
     ):
         """
         Initialize quota tracker with dedicated database connection.
 
         Args:
-            daily_limit: Daily quota limit (default: YOUTUBE_QUOTA_LIMIT env or 10000)
-            warn_threshold: Fraction of quota at which to warn
-            abort_threshold: Fraction of quota at which to abort
-            checkpoint_threshold: Auto-save quota state every N units spent
+            daily_limit: Daily quota limit (default: from config or 10000)
+            warn_threshold: Fraction of quota at which to warn (default: from config or 0.8)
+            abort_threshold: Fraction of quota at which to abort (default: from config or 0.95)
+            checkpoint_threshold: Auto-save quota state every N units spent (default: from config or 500)
         """
-        self.daily_limit = daily_limit or int(os.environ.get("YOUTUBE_QUOTA_LIMIT", 10000))
-        self.warn_threshold = warn_threshold
-        self.abort_threshold = abort_threshold
-        self._checkpoint_threshold = checkpoint_threshold
+        cfg = get_config()
+        self.daily_limit = daily_limit if daily_limit is not None else cfg.quota_limit
+        self.warn_threshold = warn_threshold if warn_threshold is not None else cfg.quota_warn_threshold
+        self.abort_threshold = abort_threshold if abort_threshold is not None else cfg.quota_abort_threshold
+        self._checkpoint_threshold = checkpoint_threshold if checkpoint_threshold is not None else cfg.quota_checkpoint_threshold
 
         self.today = date.today().isoformat()
         self.used = 0
@@ -103,8 +107,9 @@ class QuotaTracker:
         """
         import libsql
 
-        url = os.environ.get("TURSO_DATABASE_URL", "file:data/youtube.db")
-        auth_token = os.environ.get("TURSO_AUTH_TOKEN", "")
+        cfg = get_config()
+        url = cfg.database_url
+        auth_token = cfg.database_auth_token
 
         if url.startswith("libsql://") or url.startswith("https://"):
             return libsql.connect(database=url, auth_token=auth_token)

@@ -6,9 +6,11 @@ Supports multiple backends:
 - PostgreSQL - Traditional database with excellent concurrency
 - Local SQLite file (for development/testing)
 
-Set DATABASE_BACKEND environment variable to choose:
-- "turso" (default) - Uses TURSO_DATABASE_URL and TURSO_AUTH_TOKEN
-- "postgres" - Uses POSTGRES_URL (connection string)
+Configuration can be set via config/channels.yaml settings section or environment variables:
+- database_backend: "turso" (default) or "postgres"
+- database_url: Connection URL for Turso/libsql
+- TURSO_AUTH_TOKEN: Auth token (environment variable only, for security)
+- POSTGRES_URL: PostgreSQL connection string (environment variable only)
 
 Features:
 - Automatic retry with exponential backoff for transient errors
@@ -24,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Optional, Callable, Any
 
+from config import get_config
 from logger import get_logger
 
 log = get_logger(__name__)
@@ -56,11 +59,22 @@ CONNECTION_REFRESH_PATTERNS = [
     "Stream already in use",
 ]
 
-# Retry configuration optimized for Turso free tier
-DB_MAX_RETRIES = 5
-DB_BASE_DELAY = 1.0  # Start with 1 second
-DB_MAX_DELAY = 30.0  # Cap at 30 seconds
-DB_EXPONENTIAL_BASE = 2.0
+# Retry configuration helper functions - values loaded from config module
+def get_db_max_retries() -> int:
+    """Get max retries from config."""
+    return get_config().db_max_retries
+
+def get_db_base_delay() -> float:
+    """Get base delay from config."""
+    return get_config().db_base_delay
+
+def get_db_max_delay() -> float:
+    """Get max delay from config."""
+    return get_config().db_max_delay
+
+def get_db_exponential_base() -> float:
+    """Get exponential base from config."""
+    return get_config().db_exponential_base
 
 
 def is_retryable_error(error: Exception) -> bool:
@@ -82,42 +96,48 @@ def needs_connection_refresh(error: Exception) -> bool:
 
 
 def retry_db_operation(
-    max_retries: int = DB_MAX_RETRIES,
-    base_delay: float = DB_BASE_DELAY,
-    max_delay: float = DB_MAX_DELAY,
+    max_retries: int = None,
+    base_delay: float = None,
+    max_delay: float = None,
 ):
     """
     Decorator for retrying database operations with exponential backoff.
-    
+
     Handles Turso-specific transient errors like 502, 503, connection issues.
     """
     def decorator(func: Callable):
         @wraps(func)
         def wrapper(*args, **kwargs):
+            # Get config values if not specified (allows runtime config)
+            _max_retries = max_retries if max_retries is not None else get_db_max_retries()
+            _base_delay = base_delay if base_delay is not None else get_db_base_delay()
+            _max_delay = max_delay if max_delay is not None else get_db_max_delay()
+            _exp_base = get_db_exponential_base()
+
             last_exception = None
-            
-            for attempt in range(max_retries + 1):
+
+            for attempt in range(_max_retries + 1):
                 try:
                     return func(*args, **kwargs)
                 except Exception as e:
                     if is_retryable_error(e):
                         last_exception = e
-                        if attempt < max_retries:
-                            delay = min(base_delay * (DB_EXPONENTIAL_BASE ** attempt), max_delay)
-                            log.warning(f"Database error (attempt {attempt + 1}/{max_retries + 1}), "
+                        if attempt < _max_retries:
+                            delay = min(_base_delay * (_exp_base ** attempt), _max_delay)
+                            log.warning(f"Database error (attempt {attempt + 1}/{_max_retries + 1}), "
                                        f"retrying in {delay:.1f}s: {e}")
                             time.sleep(delay)
                             continue
                         else:
-                            log.error(f"Database operation failed after {max_retries + 1} attempts: {e}")
+                            log.error(f"Database operation failed after {_max_retries + 1} attempts: {e}")
                     else:
                         # Non-retryable error
                         log.error(f"Non-retryable database error: {e}")
                         raise
-            
+
             # All retries exhausted
             raise last_exception
-        
+
         return wrapper
     return decorator
 
@@ -159,9 +179,15 @@ class TursoConnection:
         IMPORTANT: Takes method_name (string) instead of bound method to ensure
         we use the NEW connection after refresh, not the old captured one.
         """
+        # Get config values for retry logic
+        max_retries = get_db_max_retries()
+        base_delay = get_db_base_delay()
+        max_delay = get_db_max_delay()
+        exp_base = get_db_exponential_base()
+
         last_exception = None
 
-        for attempt in range(DB_MAX_RETRIES + 1):
+        for attempt in range(max_retries + 1):
             try:
                 # Get fresh method reference from current connection each attempt
                 method = getattr(self._conn, method_name)
@@ -169,26 +195,26 @@ class TursoConnection:
             except Exception as e:
                 if needs_connection_refresh(e):
                     last_exception = e
-                    if attempt < DB_MAX_RETRIES:
-                        delay = min(DB_BASE_DELAY * (DB_EXPONENTIAL_BASE ** attempt), DB_MAX_DELAY)
+                    if attempt < max_retries:
+                        delay = min(base_delay * (exp_base ** attempt), max_delay)
                         log.warning(f"Stream error, refreshing connection in {delay:.1f}s "
-                                   f"(attempt {attempt + 1}/{DB_MAX_RETRIES + 1}): {e}")
+                                   f"(attempt {attempt + 1}/{max_retries + 1}): {e}")
                         time.sleep(delay)
                         self._refresh_connection()
                         continue
                     else:
-                        log.error(f"Stream error persists after {DB_MAX_RETRIES + 1} attempts: {e}")
+                        log.error(f"Stream error persists after {max_retries + 1} attempts: {e}")
                         raise
                 elif is_retryable_error(e):
                     last_exception = e
-                    if attempt < DB_MAX_RETRIES:
-                        delay = min(DB_BASE_DELAY * (DB_EXPONENTIAL_BASE ** attempt), DB_MAX_DELAY)
-                        log.warning(f"Database error (attempt {attempt + 1}/{DB_MAX_RETRIES + 1}), "
+                    if attempt < max_retries:
+                        delay = min(base_delay * (exp_base ** attempt), max_delay)
+                        log.warning(f"Database error (attempt {attempt + 1}/{max_retries + 1}), "
                                    f"retrying in {delay:.1f}s: {e}")
                         time.sleep(delay)
                         continue
                     else:
-                        log.error(f"Database operation failed after {DB_MAX_RETRIES + 1} attempts: {e}")
+                        log.error(f"Database operation failed after {max_retries + 1} attempts: {e}")
                         raise
                 else:
                     log.error(f"Non-retryable database error: {e}")
@@ -288,9 +314,15 @@ class PostgresConnection:
 
     def _execute_with_retry(self, method_name: str, sql: str = None, parameters=None):
         """Execute with retry logic and SQL conversion."""
+        # Get config values for retry logic
+        max_retries = get_db_max_retries()
+        base_delay = get_db_base_delay()
+        max_delay = get_db_max_delay()
+        exp_base = get_db_exponential_base()
+
         last_exception = None
 
-        for attempt in range(DB_MAX_RETRIES + 1):
+        for attempt in range(max_retries + 1):
             try:
                 with self._lock:
                     if sql is not None:
@@ -305,9 +337,9 @@ class PostgresConnection:
             except Exception as e:
                 if self._is_retryable(e):
                     last_exception = e
-                    if attempt < DB_MAX_RETRIES:
-                        delay = min(DB_BASE_DELAY * (DB_EXPONENTIAL_BASE ** attempt), DB_MAX_DELAY)
-                        log.warning(f"PostgreSQL error (attempt {attempt + 1}/{DB_MAX_RETRIES + 1}), "
+                    if attempt < max_retries:
+                        delay = min(base_delay * (exp_base ** attempt), max_delay)
+                        log.warning(f"PostgreSQL error (attempt {attempt + 1}/{max_retries + 1}), "
                                    f"retrying in {delay:.1f}s: {e}")
                         time.sleep(delay)
                         # Reconnect on connection errors
@@ -317,7 +349,7 @@ class PostgresConnection:
                             log.warning(f"Reconnection failed: {conn_err}")
                         continue
                     else:
-                        log.error(f"PostgreSQL operation failed after {DB_MAX_RETRIES + 1} attempts: {e}")
+                        log.error(f"PostgreSQL operation failed after {max_retries + 1} attempts: {e}")
                         raise
                 else:
                     log.error(f"Non-retryable PostgreSQL error: {e}")
@@ -369,10 +401,10 @@ _current_backend = None
 
 
 def get_database_backend() -> str:
-    """Get the current database backend type."""
+    """Get the current database backend type from config."""
     global _current_backend
     if _current_backend is None:
-        _current_backend = os.environ.get("DATABASE_BACKEND", "turso").lower()
+        _current_backend = get_config().database_backend.lower()
     return _current_backend
 
 
@@ -387,21 +419,20 @@ def get_connection():
 
     Returns a connection wrapper appropriate for the configured backend.
 
-    Environment variables:
-    - DATABASE_BACKEND: "turso" (default) or "postgres"
+    Configuration can be set via config/channels.yaml settings section:
+    - database_backend: "turso" (default) or "postgres"
+    - database_url: Connection URL for Turso/libsql
 
-    For Turso:
-    - TURSO_DATABASE_URL: libsql://your-db.turso.io (or file:local.db for local)
+    Or via environment variables (for secrets):
     - TURSO_AUTH_TOKEN: Your Turso auth token (not needed for local)
-
-    For PostgreSQL:
     - POSTGRES_URL: postgresql://user:pass@host:port/dbname
     """
+    cfg = get_config()
     backend = get_database_backend()
 
     if backend == "postgres":
         # PostgreSQL backend
-        conn_string = os.environ.get("POSTGRES_URL")
+        conn_string = cfg.postgres_url
         if not conn_string:
             raise ValueError("POSTGRES_URL environment variable required for postgres backend")
 
@@ -412,8 +443,8 @@ def get_connection():
         # Turso/libsql backend (default)
         import libsql
 
-        url = os.environ.get("TURSO_DATABASE_URL", "file:data/youtube.db")
-        auth_token = os.environ.get("TURSO_AUTH_TOKEN", "")
+        url = cfg.database_url
+        auth_token = cfg.database_auth_token
 
         log.debug(f"Connecting to database: {url[:30]}...")
 
@@ -1687,8 +1718,10 @@ def get_progress(conn, channel_id: str, fetch_id: int, operation: str) -> Option
     return None
 
 
-# Threshold for logging slow checkpoint serialization (in milliseconds)
-CHECKPOINT_SLOW_THRESHOLD_MS = 100
+# Helper function for checkpoint slow threshold from config
+def get_checkpoint_slow_threshold_ms() -> int:
+    """Get checkpoint slow threshold from config."""
+    return get_config().checkpoint_slow_threshold_ms
 
 
 def save_progress(conn, channel_id: str, fetch_id: int, operation: str,
@@ -1701,7 +1734,7 @@ def save_progress(conn, channel_id: str, fetch_id: int, operation: str,
     processed_json = json.dumps(list(processed_ids))
     serialize_ms = (time.perf_counter() - start) * 1000
 
-    if serialize_ms > CHECKPOINT_SLOW_THRESHOLD_MS:
+    if serialize_ms > get_checkpoint_slow_threshold_ms():
         log.warning(
             f"Slow checkpoint serialization: {len(processed_ids)} IDs took "
             f"{serialize_ms:.1f}ms for {operation} on channel {channel_id}"
