@@ -2,8 +2,8 @@
 Centralized configuration management for YouTube metadata fetcher.
 
 Configuration is loaded from multiple sources with the following priority:
-1. Config file (channels.yaml settings section) - highest priority for non-secrets
-2. Environment variables - required for secrets, fallback for other settings
+1. Environment variables - highest priority (standard for deployments/CI)
+2. Config file (channels.yaml settings section) - defaults for development
 3. Default values - lowest priority
 
 Secrets (auth tokens, API keys) ALWAYS come from environment variables for security.
@@ -73,7 +73,7 @@ class Config:
     """
     Configuration container with typed access to all settings.
 
-    Settings are loaded from config file with environment variable fallbacks.
+    Settings are loaded with priority: env vars > config file > defaults.
     Secrets (auth tokens) always come from environment variables.
     """
 
@@ -182,9 +182,18 @@ def load_config(config_path: Optional[str] = None) -> Config:
     if config_path and Path(config_path).exists():
         yaml_settings = _load_yaml_settings(config_path)
 
-    # Helper to get setting with priority: yaml > env > default
+    # Helper to get setting with priority: env > yaml > default
     def get_setting(yaml_key: str, env_key: str, default, cast_type=None):
-        # First check YAML
+        # First check environment variable (highest priority)
+        env_value = os.environ.get(env_key)
+        if env_value is not None:
+            if cast_type is not None:
+                try:
+                    return cast_type(env_value)
+                except (ValueError, TypeError):
+                    pass
+            return env_value
+        # Then check YAML config file
         if yaml_key in yaml_settings:
             value = yaml_settings[yaml_key]
             if cast_type is not None:
@@ -193,12 +202,12 @@ def load_config(config_path: Optional[str] = None) -> Config:
                 except (ValueError, TypeError):
                     pass
             return value
-        # Then check env
-        return _get_env_or_default(env_key, default, cast_type)
+        # Fall back to default
+        return default
 
     # Build config object
     config = Config(
-        # Database settings - URL from config, tokens from env
+        # Database settings - env vars override config file; tokens always from env
         database_backend=get_setting("database_backend", "DATABASE_BACKEND", DEFAULTS["database_backend"]),
         database_url=get_setting("database_url", "TURSO_DATABASE_URL", DEFAULTS["database_url"]),
         database_auth_token=os.environ.get("TURSO_AUTH_TOKEN", ""),  # Always from env
