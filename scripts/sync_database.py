@@ -5,23 +5,27 @@ Database Sync Tool for migrating between database backends.
 Supports syncing data between:
 - Turso (libSQL) - Cloud SQLite
 - PostgreSQL - Traditional database
-- Local SQLite file
+- Supabase - PostgreSQL-based platform
 
 Usage:
-    python sync_database.py --source turso --dest postgres
-    python sync_database.py --source postgres --dest turso --tables channels,videos
+    python sync_database.py
+    python sync_database.py --tables channels,videos
+    python sync_database.py --dry-run
 
-Environment Variables (Source):
-    SOURCE_DATABASE_BACKEND: "turso" or "postgres" (overrides --source)
-    SOURCE_TURSO_DATABASE_URL: libsql://your-db.turso.io
-    SOURCE_TURSO_AUTH_TOKEN: Your Turso auth token
-    SOURCE_POSTGRES_URL: postgresql://user:pass@host:port/dbname
+Environment Variables:
+    SYNC_SOURCE: "Turso", "PostgreSQL", or "Supabase" (from workflow dropdown)
+    SYNC_DESTINATION: "Turso", "PostgreSQL", or "Supabase" (from workflow dropdown)
 
-Environment Variables (Destination):
-    DEST_DATABASE_BACKEND: "turso" or "postgres" (overrides --dest)
-    DEST_TURSO_DATABASE_URL: libsql://your-db.turso.io
-    DEST_TURSO_AUTH_TOKEN: Your Turso auth token
-    DEST_POSTGRES_URL: postgresql://user:pass@host:port/dbname
+    For Turso:
+        TURSO_DATABASE_URL: libsql://your-db.turso.io
+        TURSO_AUTH_TOKEN: Your Turso auth token
+
+    For PostgreSQL:
+        POSTGRES_URL: postgresql://user:pass@host:port/dbname
+
+    For Supabase:
+        SUPABASE_URL: postgresql://postgres.[project]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres
+        SUPABASE_KEY: Your Supabase anon/service key (optional, for future API use)
 """
 
 import argparse
@@ -30,7 +34,7 @@ import os
 import sys
 import time
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple, Any
 
 # Add the scripts directory to the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -58,60 +62,66 @@ TABLES = {
 BATCH_SIZE = 1000
 
 
-def get_source_connection():
-    """Get connection to the source database."""
-    backend = os.environ.get("SOURCE_DATABASE_BACKEND", "turso")
+def get_connection(db_type: str, role: str) -> Tuple[Any, str]:
+    """
+    Get a database connection based on the database type.
 
-    if backend == "postgres":
-        conn_string = os.environ.get("SOURCE_POSTGRES_URL")
+    Args:
+        db_type: "Turso", "PostgreSQL", or "Supabase"
+        role: "source" or "destination" (for logging)
+
+    Returns:
+        Tuple of (connection, backend_type) where backend_type is "postgres" or "turso"
+    """
+    db_type_lower = db_type.lower()
+
+    if db_type_lower in ("postgresql", "postgres"):
+        conn_string = os.environ.get("POSTGRES_URL")
         if not conn_string:
-            raise ValueError("SOURCE_POSTGRES_URL required for postgres source")
+            raise ValueError("POSTGRES_URL environment variable required for PostgreSQL")
 
         import psycopg
-        log.info(f"Connecting to source PostgreSQL: {conn_string[:40]}...")
+        log.info(f"Connecting to {role} PostgreSQL: {conn_string[:50]}...")
         return psycopg.connect(conn_string), "postgres"
-    else:
+
+    elif db_type_lower == "supabase":
+        conn_string = os.environ.get("SUPABASE_URL")
+        if not conn_string:
+            raise ValueError("SUPABASE_URL environment variable required for Supabase")
+
+        import psycopg
+        log.info(f"Connecting to {role} Supabase: {conn_string[:50]}...")
+        return psycopg.connect(conn_string), "postgres"
+
+    elif db_type_lower == "turso":
         import libsql
-        url = os.environ.get("SOURCE_TURSO_DATABASE_URL")
-        auth_token = os.environ.get("SOURCE_TURSO_AUTH_TOKEN", "")
+        url = os.environ.get("TURSO_DATABASE_URL")
+        auth_token = os.environ.get("TURSO_AUTH_TOKEN", "")
 
         if not url:
-            raise ValueError("SOURCE_TURSO_DATABASE_URL required for turso source")
+            raise ValueError("TURSO_DATABASE_URL environment variable required for Turso")
 
-        log.info(f"Connecting to source Turso: {url[:40]}...")
+        log.info(f"Connecting to {role} Turso: {url[:50]}...")
         if url.startswith("libsql://") or url.startswith("https://"):
             conn = libsql.connect(database=url, auth_token=auth_token)
         else:
             conn = libsql.connect(database=url)
         return conn, "turso"
 
-
-def get_dest_connection():
-    """Get connection to the destination database."""
-    backend = os.environ.get("DEST_DATABASE_BACKEND", "postgres")
-
-    if backend == "postgres":
-        conn_string = os.environ.get("DEST_POSTGRES_URL")
-        if not conn_string:
-            raise ValueError("DEST_POSTGRES_URL required for postgres destination")
-
-        import psycopg
-        log.info(f"Connecting to destination PostgreSQL: {conn_string[:40]}...")
-        return psycopg.connect(conn_string), "postgres"
     else:
-        import libsql
-        url = os.environ.get("DEST_TURSO_DATABASE_URL")
-        auth_token = os.environ.get("DEST_TURSO_AUTH_TOKEN", "")
+        raise ValueError(f"Unknown database type: {db_type}. Use 'Turso', 'PostgreSQL', or 'Supabase'")
 
-        if not url:
-            raise ValueError("DEST_TURSO_DATABASE_URL required for turso destination")
 
-        log.info(f"Connecting to destination Turso: {url[:40]}...")
-        if url.startswith("libsql://") or url.startswith("https://"):
-            conn = libsql.connect(database=url, auth_token=auth_token)
-        else:
-            conn = libsql.connect(database=url)
-        return conn, "turso"
+def get_source_connection() -> Tuple[Any, str]:
+    """Get connection to the source database based on SYNC_SOURCE env var."""
+    source = os.environ.get("SYNC_SOURCE", "Turso")
+    return get_connection(source, "source")
+
+
+def get_dest_connection() -> Tuple[Any, str]:
+    """Get connection to the destination database based on SYNC_DESTINATION env var."""
+    dest = os.environ.get("SYNC_DESTINATION", "Supabase")
+    return get_connection(dest, "destination")
 
 
 def create_tables_sqlite(conn) -> None:
@@ -665,8 +675,15 @@ def sync_databases(
         Dictionary with sync results
     """
     start_time = time.time()
+
+    # Get human-readable names from env
+    source_name = os.environ.get("SYNC_SOURCE", "Turso")
+    dest_name = os.environ.get("SYNC_DESTINATION", "Supabase")
+
     results = {
         "started_at": datetime.utcnow().isoformat(),
+        "source": source_name,
+        "destination": dest_name,
         "tables": [],
         "status": "success"
     }
@@ -741,8 +758,8 @@ def print_results(results: dict) -> None:
     print("\n" + "=" * 60)
     print("DATABASE SYNC RESULTS")
     print("=" * 60)
-    print(f"Source: {results.get('source_backend', 'unknown')}")
-    print(f"Destination: {results.get('dest_backend', 'unknown')}")
+    print(f"Source: {results.get('source', results.get('source_backend', 'unknown'))}")
+    print(f"Destination: {results.get('destination', results.get('dest_backend', 'unknown'))}")
     print(f"Started: {results.get('started_at', 'unknown')}")
     print(f"Duration: {results.get('duration_seconds', 0)} seconds")
     print(f"Status: {results.get('status', 'unknown')}")
