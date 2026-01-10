@@ -689,21 +689,40 @@ def sync_databases(
     }
 
     try:
-        # Connect to databases
-        source_conn, source_backend = get_source_connection()
-        dest_conn, dest_backend = get_dest_connection()
+        # Determine backends from env
+        source_type = source_name.lower()
+        dest_type = dest_name.lower()
+
+        # Map to backend types
+        if source_type in ("postgresql", "postgres", "supabase"):
+            source_backend = "postgres"
+        else:
+            source_backend = "turso"
+
+        if dest_type in ("postgresql", "postgres", "supabase"):
+            dest_backend = "postgres"
+        else:
+            dest_backend = "turso"
 
         results["source_backend"] = source_backend
         results["dest_backend"] = dest_backend
 
-        log.info(f"Source: {source_backend}, Destination: {dest_backend}")
+        log.info(f"Source: {source_name} ({source_backend}), Destination: {dest_name} ({dest_backend})")
 
         # Create tables in destination if requested
         if create_tables and not dry_run:
+            log.info("Creating tables in destination...")
+            dest_conn, _ = get_dest_connection()
             if dest_backend == "postgres":
                 create_tables_postgres(dest_conn)
             else:
                 create_tables_sqlite(dest_conn)
+            # Close after table creation
+            try:
+                if dest_backend == "postgres":
+                    dest_conn.close()
+            except Exception:
+                pass
 
         # Determine which tables to sync
         if tables_to_sync:
@@ -714,9 +733,15 @@ def sync_databases(
         else:
             tables = TABLES
 
-        # Sync each table
+        # Sync each table with fresh connections to avoid Turso stream timeouts
         for table_name, table_info in tables.items():
             try:
+                # Get fresh connections for each table to avoid stream expiry
+                # This is especially important for Turso which has stream timeouts
+                log.info(f"Refreshing connections for table: {table_name}")
+                source_conn, source_backend = get_source_connection()
+                dest_conn, dest_backend = get_dest_connection()
+
                 result = sync_table(
                     source_conn, source_backend,
                     dest_conn, dest_backend,
@@ -724,6 +749,16 @@ def sync_databases(
                     dry_run=dry_run
                 )
                 results["tables"].append(result)
+
+                # Close connections after each table
+                try:
+                    if source_backend == "postgres":
+                        source_conn.close()
+                    if dest_backend == "postgres":
+                        dest_conn.close()
+                except Exception:
+                    pass
+
             except Exception as e:
                 log.error(f"Error syncing table {table_name}: {e}")
                 results["tables"].append({
@@ -732,15 +767,6 @@ def sync_databases(
                     "error": str(e)
                 })
                 results["status"] = "partial"
-
-        # Close connections
-        try:
-            if source_backend == "postgres":
-                source_conn.close()
-            if dest_backend == "postgres":
-                dest_conn.close()
-        except:
-            pass
 
     except Exception as e:
         log.error(f"Sync failed: {e}")
