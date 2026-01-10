@@ -74,7 +74,7 @@ settings:
   # Database backend: "turso" (default) or "postgres"
   # NOTE: Turso/libsql backend auto-disables parallel workers due to thread-safety issues
   #       Use PostgreSQL backend for parallel processing
-  database_backend: turso
+  database_backend: postgres
 
   # Database URL for Turso/libsql backend
   # Format: "file:path/to/local.db" for local SQLite or "libsql://your-db.turso.io" for remote
@@ -125,7 +125,7 @@ settings:
   # PERFORMANCE TUNING
   # ============================================================================
   default_comment_workers: 5         # Parallel workers for comment fetching
-  progress_log_interval: 10          # Log progress every N batches
+  progress_log_interval: 5          # Log progress every N batches
   progress_callback_interval: 5      # Progress callback frequency
   checkpoint_slow_threshold_ms: 100  # Warn if checkpoint serialization exceeds this
 
@@ -150,7 +150,7 @@ settings:
   # Parallel workers for channel processing (1=sequential, 2-3 for faster runs)
   # Each worker creates its own DB connection and API client
   # Quota tracking uses a dedicated connection with auto-checkpointing
-  channel_workers: 1
+  channel_workers: 5
 
   # Video discovery mode:
   # - auto: Use search API for incremental updates, playlist for backfill (default)
