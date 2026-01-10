@@ -36,7 +36,21 @@ on:
         required: false
         type: boolean
         default: false
-  
+      log_level:
+        description: 'Console log level'
+        required: false
+        type: choice
+        options:
+          - INFO
+          - DEBUG
+          - WARNING
+        default: INFO
+      progress_log_interval:
+        description: 'Log progress every N batches (1 = every batch)'
+        required: false
+        type: number
+        default: 10
+
   # Scheduled runs - 4 times daily
   schedule:
     - cron: '0 0 * * *'   # Midnight UTC
@@ -89,6 +103,8 @@ jobs:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          CONSOLE_LOG_LEVEL: ${{ github.event.inputs.log_level || 'INFO' }}
+          PROGRESS_LOG_INTERVAL: ${{ github.event.inputs.progress_log_interval || '10' }}
         run: |
           cd scripts
           

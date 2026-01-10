@@ -1,0 +1,261 @@
+name: Database Sync v2 (pgloader)
+
+on:
+  workflow_dispatch:
+    inputs:
+      destination:
+        description: 'Destination database'
+        required: true
+        type: choice
+        options:
+          - Supabase
+          - PostgreSQL
+        default: Supabase
+      tables:
+        description: 'Tables to sync (comma-separated, leave empty for all)'
+        required: false
+        type: string
+      dry_run:
+        description: 'Dry run (export only, no import)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: database-sync-v2
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Turso CLI
+        run: |
+          curl -sSfL https://get.tur.so/install.sh | bash
+          echo "$HOME/.turso" >> $GITHUB_PATH
+
+      - name: Install pgloader
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pgloader
+
+      - name: Export Turso database to SQLite
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: |
+          # Extract database name from URL (libsql://dbname-org.turso.io)
+          DB_URL="${TURSO_DATABASE_URL}"
+
+          # Create auth token file for turso CLI
+          mkdir -p ~/.turso
+          echo "$TURSO_AUTH_TOKEN" > ~/.turso/token
+
+          # Export using libsql Python (more reliable than CLI in CI)
+          pip install libsql
+
+          python3 << 'EOF'
+          import libsql
+          import os
+          import sqlite3
+
+          # Connect to Turso
+          url = os.environ['TURSO_DATABASE_URL']
+          token = os.environ['TURSO_AUTH_TOKEN']
+
+          print(f"Connecting to Turso: {url[:50]}...")
+          turso_conn = libsql.connect(database=url, auth_token=token)
+
+          # Create local SQLite file
+          local_conn = sqlite3.connect('turso_export.db')
+          local_cursor = local_conn.cursor()
+
+          # Get all tables
+          tables_result = turso_conn.execute(
+              "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+          ).fetchall()
+          tables = [t[0] for t in tables_result]
+          print(f"Found tables: {tables}")
+
+          for table in tables:
+              print(f"Exporting table: {table}")
+
+              # Get table schema
+              schema = turso_conn.execute(
+                  f"SELECT sql FROM sqlite_master WHERE type='table' AND name='{table}'"
+              ).fetchone()[0]
+
+              # Create table in local SQLite
+              try:
+                  local_cursor.execute(schema)
+              except sqlite3.OperationalError as e:
+                  if "already exists" not in str(e):
+                      raise
+
+              # Copy data in batches
+              offset = 0
+              batch_size = 1000
+              total = 0
+
+              while True:
+                  rows = turso_conn.execute(
+                      f"SELECT * FROM {table} LIMIT {batch_size} OFFSET {offset}"
+                  ).fetchall()
+
+                  if not rows:
+                      break
+
+                  # Get column count from first row
+                  placeholders = ','.join(['?' for _ in rows[0]])
+
+                  local_cursor.executemany(
+                      f"INSERT OR REPLACE INTO {table} VALUES ({placeholders})",
+                      rows
+                  )
+
+                  total += len(rows)
+                  offset += batch_size
+
+                  if offset % 10000 == 0:
+                      print(f"  {table}: {total} rows exported...")
+                      local_conn.commit()
+
+              local_conn.commit()
+              print(f"  {table}: {total} rows exported (complete)")
+
+          local_conn.close()
+          print("Export complete: turso_export.db")
+          EOF
+
+          # Show file size
+          ls -lh turso_export.db
+
+      - name: Create pgloader configuration
+        env:
+          DEST_TYPE: ${{ github.event.inputs.destination }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          TABLES: ${{ github.event.inputs.tables }}
+        run: |
+          # Determine destination URL
+          if [ "$DEST_TYPE" == "Supabase" ]; then
+            DEST_URL="$SUPABASE_URL"
+          else
+            DEST_URL="$POSTGRES_URL"
+          fi
+
+          # Build table filter if specified
+          TABLE_FILTER=""
+          if [ -n "$TABLES" ]; then
+            # Convert comma-separated to pgloader format
+            TABLE_FILTER="including only table names matching"
+            IFS=',' read -ra TABLE_ARRAY <<< "$TABLES"
+            for t in "${TABLE_ARRAY[@]}"; do
+              TABLE_FILTER="$TABLE_FILTER '$(echo $t | xargs)'"
+            done
+          fi
+
+          # Create pgloader command file
+          cat > migrate.load << LOADFILE
+          LOAD DATABASE
+            FROM sqlite://turso_export.db
+            INTO $DEST_URL
+
+          WITH
+            data only,
+            truncate,
+            disable triggers,
+            batch rows = 1000,
+            prefetch rows = 10000
+
+          SET work_mem to '256MB',
+              maintenance_work_mem to '512MB'
+
+          $TABLE_FILTER
+
+          BEFORE LOAD DO
+            \$\$ DROP TABLE IF EXISTS _pgloader_temp CASCADE; \$\$;
+          LOADFILE
+
+          echo "pgloader configuration created"
+          cat migrate.load
+
+      - name: Run pgloader migration
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          DEST_TYPE: ${{ github.event.inputs.destination }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+        run: |
+          echo "Starting pgloader migration..."
+          pgloader migrate.load
+          echo "Migration complete!"
+
+      - name: Dry run - show export stats
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        run: |
+          echo "Dry run mode - showing export statistics"
+          sqlite3 turso_export.db << 'EOF'
+          .headers on
+          .mode column
+          SELECT name as table_name,
+                 (SELECT COUNT(*) FROM pragma_table_info(name)) as columns
+          FROM sqlite_master
+          WHERE type='table' AND name NOT LIKE 'sqlite_%'
+          ORDER BY name;
+          EOF
+
+          echo ""
+          echo "Row counts:"
+          for table in $(sqlite3 turso_export.db "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"); do
+            count=$(sqlite3 turso_export.db "SELECT COUNT(*) FROM $table")
+            echo "  $table: $count rows"
+          done
+
+      - name: Generate summary report
+        if: always()
+        run: |
+          echo "## Database Sync v2 (pgloader) Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Run time:** $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Source:** Turso" >> $GITHUB_STEP_SUMMARY
+          echo "- **Destination:** ${{ github.event.inputs.destination }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Dry run:** ${{ github.event.inputs.dry_run }}" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ github.event.inputs.tables }}" ]; then
+            echo "- **Tables:** ${{ github.event.inputs.tables }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Tables:** all" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f turso_export.db ]; then
+            echo "### Export Statistics" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "SQLite file size: $(ls -lh turso_export.db | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            for table in $(sqlite3 turso_export.db "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'" 2>/dev/null || echo ""); do
+              if [ -n "$table" ]; then
+                count=$(sqlite3 turso_export.db "SELECT COUNT(*) FROM $table" 2>/dev/null || echo "?")
+                echo "$table: $count rows" >> $GITHUB_STEP_SUMMARY
+              fi
+            done
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload SQLite export
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: turso-export-${{ github.run_number }}
+          path: turso_export.db
+          retention-days: 7
+          if-no-files-found: ignore
