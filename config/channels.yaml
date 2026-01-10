@@ -35,8 +35,16 @@ channels:
   - "@bashbunni"
   - "@AndyMath"
   - "@ChrisWilsonVideos"
+  - "@MachineLearningStreetTalk"
+  - "@AI-Makerspace"
+  - "@googledeepmind"
+  - "@anthropic-ai"
+  - "@OpenAI"
   - "@podsaveamerica"
   - "@bulwarkmedia"
+  - "@ivehaditpodcast"
+  - "@MeidasTouch"
+  
   
   # Detailed format with options
   # - identifier: "@mkbhd"
