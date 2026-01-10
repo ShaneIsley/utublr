@@ -504,6 +504,25 @@ def count_rows(conn, table: str, backend: str) -> int:
         return cursor.fetchone()[0]
 
 
+def fetch_existing_pks(conn, table: str, pk_columns: list, backend: str) -> set:
+    """Fetch all primary key values from a table for incremental sync."""
+    pk_list = ", ".join(pk_columns)
+
+    if backend == "postgres":
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT {pk_list} FROM {table}")
+        rows = cursor.fetchall()
+    else:
+        cursor = conn.execute(f"SELECT {pk_list} FROM {table}")
+        rows = cursor.fetchall()
+
+    # For single-column PK, store as simple values; for composite, store as tuples
+    if len(pk_columns) == 1:
+        return {row[0] for row in rows}
+    else:
+        return {tuple(row) for row in rows}
+
+
 def fetch_rows(conn, table: str, backend: str, offset: int, limit: int, order_by: str) -> list:
     """Fetch rows from a table with pagination."""
     if backend == "postgres":
@@ -585,10 +604,16 @@ def sync_table(
     dest_backend: str,
     table: str,
     table_info: dict,
-    dry_run: bool = False
+    dry_run: bool = False,
+    incremental: bool = False
 ) -> dict:
-    """Sync a single table from source to destination."""
-    log.info(f"Syncing table: {table}")
+    """Sync a single table from source to destination.
+
+    Args:
+        incremental: If True, only sync rows that don't exist in destination (based on PK).
+                    This significantly reduces reads from source.
+    """
+    log.info(f"Syncing table: {table}" + (" (incremental)" if incremental else " (full)"))
 
     # Get column information from source
     source_columns = get_table_columns(source_conn, table, source_backend)
@@ -601,11 +626,24 @@ def sync_table(
     source_count = count_rows(source_conn, table, source_backend)
     log.info(f"  Source has {source_count} rows")
 
+    pk_columns = table_info["pk"]
+    order_by = table_info["order_by"]
+
+    # For incremental sync, get existing PKs from destination
+    existing_pks = set()
+    if incremental:
+        try:
+            existing_pks = fetch_existing_pks(dest_conn, table, pk_columns, dest_backend)
+            log.info(f"  Destination has {len(existing_pks)} existing rows")
+        except Exception as e:
+            log.warning(f"  Could not fetch destination PKs (table may not exist): {e}")
+
     if dry_run:
         return {
             "table": table,
             "status": "dry_run",
             "source_count": source_count,
+            "dest_count": len(existing_pks) if incremental else 0,
             "synced": 0
         }
 
@@ -618,11 +656,12 @@ def sync_table(
         missing = set(source_columns) - set(common_columns)
         log.warning(f"  Columns missing in destination: {missing}")
 
-    pk_columns = table_info["pk"]
-    order_by = table_info["order_by"]
+    # Get indices for PK columns in source to filter rows
+    pk_indices = [source_columns.index(c) for c in pk_columns]
 
     # Sync in batches
     total_synced = 0
+    total_skipped = 0
     offset = 0
 
     while offset < source_count:
@@ -633,35 +672,62 @@ def sync_table(
         # Get column indices for common columns
         col_indices = [source_columns.index(c) for c in common_columns]
 
-        # Extract only common columns from rows
-        filtered_rows = [tuple(row[i] for i in col_indices) for row in rows]
+        # Filter rows for incremental sync
+        if incremental and existing_pks:
+            rows_to_sync = []
+            for row in rows:
+                # Extract PK value(s) for this row
+                if len(pk_columns) == 1:
+                    pk_value = row[pk_indices[0]]
+                else:
+                    pk_value = tuple(row[i] for i in pk_indices)
+
+                if pk_value not in existing_pks:
+                    rows_to_sync.append(row)
+                else:
+                    total_skipped += 1
+
+            # Extract only common columns from filtered rows
+            filtered_rows = [tuple(row[i] for i in col_indices) for row in rows_to_sync]
+        else:
+            # Full sync - extract common columns from all rows
+            filtered_rows = [tuple(row[i] for i in col_indices) for row in rows]
 
         # Insert into destination
-        if dest_backend == "postgres":
-            inserted = insert_rows_postgres(dest_conn, table, common_columns, filtered_rows, pk_columns)
-        else:
-            inserted = insert_rows_sqlite(dest_conn, table, common_columns, filtered_rows, pk_columns)
+        if filtered_rows:
+            if dest_backend == "postgres":
+                inserted = insert_rows_postgres(dest_conn, table, common_columns, filtered_rows, pk_columns)
+            else:
+                inserted = insert_rows_sqlite(dest_conn, table, common_columns, filtered_rows, pk_columns)
+            total_synced += inserted
 
-        total_synced += inserted
         offset += len(rows)
 
         if offset % (BATCH_SIZE * 10) == 0 or offset >= source_count:
-            log.info(f"  Progress: {offset}/{source_count} rows processed, {total_synced} synced")
+            if incremental:
+                log.info(f"  Progress: {offset}/{source_count} rows checked, {total_synced} new, {total_skipped} skipped")
+            else:
+                log.info(f"  Progress: {offset}/{source_count} rows processed, {total_synced} synced")
 
-    log.info(f"  Completed: {total_synced} rows synced")
+    if incremental:
+        log.info(f"  Completed: {total_synced} new rows synced, {total_skipped} already existed")
+    else:
+        log.info(f"  Completed: {total_synced} rows synced")
 
     return {
         "table": table,
         "status": "success",
         "source_count": source_count,
-        "synced": total_synced
+        "synced": total_synced,
+        "skipped": total_skipped if incremental else 0
     }
 
 
 def sync_databases(
     tables_to_sync: Optional[list] = None,
     create_tables: bool = True,
-    dry_run: bool = False
+    dry_run: bool = False,
+    incremental: bool = False
 ) -> dict:
     """
     Sync data from source database to destination database.
@@ -670,6 +736,7 @@ def sync_databases(
         tables_to_sync: List of table names to sync (None = all tables)
         create_tables: Whether to create tables in destination if they don't exist
         dry_run: If True, only report what would be synced
+        incremental: If True, only sync rows that don't exist in destination
 
     Returns:
         Dictionary with sync results
@@ -684,6 +751,7 @@ def sync_databases(
         "started_at": datetime.utcnow().isoformat(),
         "source": source_name,
         "destination": dest_name,
+        "mode": "incremental" if incremental else "full",
         "tables": [],
         "status": "success"
     }
@@ -746,7 +814,8 @@ def sync_databases(
                     source_conn, source_backend,
                     dest_conn, dest_backend,
                     table_name, table_info,
-                    dry_run=dry_run
+                    dry_run=dry_run,
+                    incremental=incremental
                 )
                 results["tables"].append(result)
 
@@ -786,37 +855,53 @@ def print_results(results: dict) -> None:
     print("=" * 60)
     print(f"Source: {results.get('source', results.get('source_backend', 'unknown'))}")
     print(f"Destination: {results.get('destination', results.get('dest_backend', 'unknown'))}")
+    print(f"Mode: {results.get('mode', 'full')}")
     print(f"Started: {results.get('started_at', 'unknown')}")
     print(f"Duration: {results.get('duration_seconds', 0)} seconds")
     print(f"Status: {results.get('status', 'unknown')}")
     print()
+
+    is_incremental = results.get('mode') == 'incremental'
 
     if results.get("tables"):
         print("Table Results:")
         print("-" * 60)
         total_source = 0
         total_synced = 0
+        total_skipped = 0
 
         for table_result in results["tables"]:
             table = table_result["table"]
             status = table_result["status"]
             source_count = table_result.get("source_count", 0)
             synced = table_result.get("synced", 0)
+            skipped = table_result.get("skipped", 0)
 
             total_source += source_count
             total_synced += synced
+            total_skipped += skipped
 
             if status == "success":
-                print(f"  {table}: {synced}/{source_count} rows synced")
+                if is_incremental and skipped > 0:
+                    print(f"  {table}: {synced} new, {skipped} skipped (of {source_count} total)")
+                else:
+                    print(f"  {table}: {synced}/{source_count} rows synced")
             elif status == "dry_run":
-                print(f"  {table}: {source_count} rows (dry run)")
+                dest_count = table_result.get("dest_count", 0)
+                if is_incremental:
+                    print(f"  {table}: {source_count} source, {dest_count} in dest (dry run)")
+                else:
+                    print(f"  {table}: {source_count} rows (dry run)")
             elif status == "skipped":
                 print(f"  {table}: skipped - {table_result.get('reason', 'unknown')}")
             elif status == "error":
                 print(f"  {table}: ERROR - {table_result.get('error', 'unknown')}")
 
         print("-" * 60)
-        print(f"Total: {total_synced}/{total_source} rows synced")
+        if is_incremental:
+            print(f"Total: {total_synced} new rows synced, {total_skipped} already existed")
+        else:
+            print(f"Total: {total_synced}/{total_source} rows synced")
 
     if results.get("error"):
         print(f"\nError: {results['error']}")
@@ -860,6 +945,13 @@ Examples:
     )
 
     parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Only sync rows that don't exist in destination (based on primary key). "
+             "Significantly reduces reads from source database."
+    )
+
+    parser.add_argument(
         "--no-create-tables",
         action="store_true",
         help="Don't create tables in destination (assumes they exist)"
@@ -882,7 +974,8 @@ Examples:
     results = sync_databases(
         tables_to_sync=tables_to_sync,
         create_tables=not args.no_create_tables,
-        dry_run=args.dry_run
+        dry_run=args.dry_run,
+        incremental=args.incremental
     )
 
     # Output results

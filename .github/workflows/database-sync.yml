@@ -31,6 +31,11 @@ on:
         required: false
         type: boolean
         default: true
+      incremental:
+        description: 'Incremental sync (only sync rows missing from destination)'
+        required: false
+        type: boolean
+        default: true
       create_tables:
         description: 'Create tables in destination if they do not exist'
         required: false
@@ -96,6 +101,10 @@ jobs:
             CMD="$CMD --dry-run"
           fi
 
+          if [ "${{ github.event.inputs.incremental }}" == "true" ]; then
+            CMD="$CMD --incremental"
+          fi
+
           if [ "${{ github.event.inputs.create_tables }}" == "false" ]; then
             CMD="$CMD --no-create-tables"
           fi
@@ -127,6 +136,7 @@ jobs:
           echo "### Configuration" >> $GITHUB_STEP_SUMMARY
           echo "- **Source:** ${{ github.event.inputs.source }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Destination:** ${{ github.event.inputs.destination }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Mode:** ${{ github.event.inputs.incremental == 'true' && 'incremental' || 'full' }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Dry run:** ${{ github.event.inputs.dry_run }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Create tables:** ${{ github.event.inputs.create_tables }}" >> $GITHUB_STEP_SUMMARY
           if [ -n "${{ github.event.inputs.tables }}" ]; then
@@ -143,6 +153,9 @@ jobs:
 
           # Re-run with JSON output for summary (dry-run only to avoid duplicate sync)
           CMD="python sync_database.py --json --dry-run"
+          if [ "${{ github.event.inputs.incremental }}" == "true" ]; then
+            CMD="$CMD --incremental"
+          fi
           if [ -n "${{ github.event.inputs.tables }}" ]; then
             CMD="$CMD --tables '${{ github.event.inputs.tables }}'"
           fi
