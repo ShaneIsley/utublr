@@ -20,6 +20,7 @@ Features:
 
 import json
 import os
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -305,6 +306,55 @@ class PostgresConnection:
                 result = result.rstrip()
                 if result.endswith(")"):
                     result += " ON CONFLICT DO NOTHING"
+
+        # Convert SQLite datetime() function to PostgreSQL equivalents
+        # datetime('now') -> NOW()
+        result = re.sub(
+            r"datetime\s*\(\s*'now'\s*\)",
+            "NOW()",
+            result,
+            flags=re.IGNORECASE
+        )
+
+        # datetime('now', '-N days') -> NOW() - INTERVAL 'N days'
+        result = re.sub(
+            r"datetime\s*\(\s*'now'\s*,\s*'(-?\d+)\s+days'\s*\)",
+            r"NOW() + INTERVAL '\1 days'",
+            result,
+            flags=re.IGNORECASE
+        )
+
+        # datetime('now', '-N hours') -> NOW() - INTERVAL 'N hours'
+        result = re.sub(
+            r"datetime\s*\(\s*'now'\s*,\s*'(-?\d+)\s+hours'\s*\)",
+            r"NOW() + INTERVAL '\1 hours'",
+            result,
+            flags=re.IGNORECASE
+        )
+
+        # datetime('now', '-' || expr || ' hours') -> NOW() - (expr || ' hours')::INTERVAL
+        # This handles dynamic interval construction
+        result = re.sub(
+            r"datetime\s*\(\s*'now'\s*,\s*'-'\s*\|\|\s*(.+?)\s*\|\|\s*'\s*hours\s*'\s*\)",
+            r"NOW() - ((\1) || ' hours')::INTERVAL",
+            result,
+            flags=re.IGNORECASE
+        )
+
+        # datetime('now', '-' || expr || ' days') -> NOW() - (expr || ' days')::INTERVAL
+        result = re.sub(
+            r"datetime\s*\(\s*'now'\s*,\s*'-'\s*\|\|\s*(.+?)\s*\|\|\s*'\s*days\s*'\s*\)",
+            r"NOW() - ((\1) || ' days')::INTERVAL",
+            result,
+            flags=re.IGNORECASE
+        )
+
+        # datetime(column) -> column (PostgreSQL doesn't need datetime wrapper)
+        result = re.sub(
+            r"datetime\s*\(\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*\)",
+            r"\1",
+            result
+        )
 
         return result
 
