@@ -101,6 +101,7 @@ jobs:
         id: fetch
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           CONSOLE_LOG_LEVEL: ${{ github.event.inputs.log_level || 'INFO' }}
@@ -146,6 +147,7 @@ jobs:
       - name: Generate summary report
         if: always()
         env:
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
         run: |
