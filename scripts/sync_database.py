@@ -85,9 +85,9 @@ def get_connection(db_type: str, role: str) -> Tuple[Any, str]:
         return psycopg.connect(conn_string), "postgres"
 
     elif db_type_lower == "supabase":
-        conn_string = os.environ.get("SUPABASE_URL")
+        conn_string = os.environ.get("SUPABASE_URL") or os.environ.get("POSTGRES_URL")
         if not conn_string:
-            raise ValueError("SUPABASE_URL environment variable required for Supabase")
+            raise ValueError("SUPABASE_URL or POSTGRES_URL environment variable required for Supabase")
 
         import psycopg
         log.info(f"Connecting to {role} Supabase: {conn_string[:50]}...")
