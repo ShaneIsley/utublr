@@ -18,6 +18,7 @@ from typing import Optional
 
 from config import get_config
 from logger import get_logger
+from database import get_connection as get_db_connection, is_postgres
 
 log = get_logger("quota")
 
@@ -102,22 +103,10 @@ class QuotaTracker:
         """
         Create a fresh database connection for quota operations.
 
-        Creates a new connection each time to avoid thread-safety issues
-        with libsql's C library when multiple threads access the same connection.
+        Uses the database module's get_connection() which respects the
+        configured backend (PostgreSQL or Turso/libsql).
         """
-        import libsql
-
-        cfg = get_config()
-        url = cfg.database_url
-        auth_token = cfg.database_auth_token
-
-        if url.startswith("libsql://") or url.startswith("https://"):
-            return libsql.connect(database=url, auth_token=auth_token)
-        else:
-            if url.startswith("file:"):
-                filepath = url[5:]
-                os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
-            return libsql.connect(database=url)
+        return get_db_connection()
 
     def _load_state(self):
         """Load persisted quota state from database."""
