@@ -79,7 +79,8 @@ settings:
   # Database URL for Turso/libsql backend
   # Format: "file:path/to/local.db" for local SQLite or "libsql://your-db.turso.io" for remote
   # Can also be set via TURSO_DATABASE_URL environment variable
-  database_url: file:data/youtube.db
+  # NOTE: Comment out to use TURSO_DATABASE_URL env var in CI/production
+  # database_url: file:data/youtube.db
 
   # NOTE: Authentication tokens should be set via environment variables for security:
   # - TURSO_AUTH_TOKEN: Auth token for remote Turso databases
