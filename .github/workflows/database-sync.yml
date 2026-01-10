@@ -1,0 +1,159 @@
+name: Database Sync
+
+on:
+  # Manual trigger only - database migration is a deliberate action
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'Source database'
+        required: true
+        type: choice
+        options:
+          - Turso
+          - PostgreSQL
+          - Supabase
+        default: Turso
+      destination:
+        description: 'Destination database'
+        required: true
+        type: choice
+        options:
+          - Supabase
+          - PostgreSQL
+          - Turso
+        default: Supabase
+      tables:
+        description: 'Tables to sync (comma-separated, leave empty for all)'
+        required: false
+        type: string
+      dry_run:
+        description: 'Dry run (report only, no changes)'
+        required: false
+        type: boolean
+        default: true
+      create_tables:
+        description: 'Create tables in destination if they do not exist'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    # Prevent concurrent syncs to avoid conflicts
+    concurrency:
+      group: database-sync
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate inputs
+        run: |
+          if [ "${{ github.event.inputs.source }}" == "${{ github.event.inputs.destination }}" ]; then
+            echo "::error::Source and destination cannot be the same"
+            exit 1
+          fi
+
+      - name: Run database sync
+        id: sync
+        env:
+          # Pass selection to script
+          SYNC_SOURCE: ${{ github.event.inputs.source }}
+          SYNC_DESTINATION: ${{ github.event.inputs.destination }}
+          # Turso credentials (existing)
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          # PostgreSQL credentials (existing)
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          # Supabase credentials
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          cd scripts
+
+          # Build command
+          CMD="python sync_database.py"
+
+          # Add flags
+          if [ "${{ github.event.inputs.dry_run }}" == "true" ]; then
+            CMD="$CMD --dry-run"
+          fi
+
+          if [ "${{ github.event.inputs.create_tables }}" == "false" ]; then
+            CMD="$CMD --no-create-tables"
+          fi
+
+          if [ -n "${{ github.event.inputs.tables }}" ]; then
+            CMD="$CMD --tables '${{ github.event.inputs.tables }}'"
+          fi
+
+          echo "Running: $CMD"
+          echo "Source: ${{ github.event.inputs.source }}"
+          echo "Destination: ${{ github.event.inputs.destination }}"
+          eval $CMD
+
+      - name: Generate summary report
+        if: always()
+        env:
+          SYNC_SOURCE: ${{ github.event.inputs.source }}
+          SYNC_DESTINATION: ${{ github.event.inputs.destination }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          echo "## Database Sync Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Run time:** $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Source:** ${{ github.event.inputs.source }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Destination:** ${{ github.event.inputs.destination }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Dry run:** ${{ github.event.inputs.dry_run }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Create tables:** ${{ github.event.inputs.create_tables }}" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ github.event.inputs.tables }}" ]; then
+            echo "- **Tables:** ${{ github.event.inputs.tables }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Tables:** all" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Show JSON results if available
+          cd scripts
+          echo "### Sync Details" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          # Re-run with JSON output for summary (dry-run only to avoid duplicate sync)
+          CMD="python sync_database.py --json --dry-run"
+          if [ -n "${{ github.event.inputs.tables }}" ]; then
+            CMD="$CMD --tables '${{ github.event.inputs.tables }}'"
+          fi
+          eval $CMD >> $GITHUB_STEP_SUMMARY 2>&1 || echo "Could not generate JSON summary"
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-logs-${{ github.run_number }}
+          path: scripts/logs/
+          retention-days: 30
+          if-no-files-found: ignore
