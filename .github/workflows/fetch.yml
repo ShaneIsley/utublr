@@ -91,39 +91,43 @@ jobs:
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
         run: |
           cd scripts
-          
+
           # Build command
           if [ -n "${{ github.event.inputs.channel }}" ]; then
             CMD="python fetch.py --channel '${{ github.event.inputs.channel }}'"
           else
             CMD="python fetch.py --config ../config/channels.yaml"
           fi
-          
+
           # Add flags
           if [ "${{ github.event.inputs.backfill }}" == "true" ]; then
             CMD="$CMD --backfill"
           fi
-          
+
+          # Convert numeric inputs to integers (iOS GitHub app sends floats like "10.0")
           if [ -n "${{ github.event.inputs.max_videos }}" ]; then
-            CMD="$CMD --max-videos ${{ github.event.inputs.max_videos }}"
+            MAX_VIDEOS=$(printf "%.0f" "${{ github.event.inputs.max_videos }}")
+            CMD="$CMD --max-videos $MAX_VIDEOS"
           fi
-          
+
           if [ -n "${{ github.event.inputs.max_video_age }}" ]; then
-            CMD="$CMD --max-video-age ${{ github.event.inputs.max_video_age }}"
+            MAX_VIDEO_AGE=$(printf "%.0f" "${{ github.event.inputs.max_video_age }}")
+            CMD="$CMD --max-video-age $MAX_VIDEO_AGE"
           fi
-          
+
           if [ "${{ github.event.inputs.skip_comments }}" == "true" ]; then
             CMD="$CMD --skip-comments"
           fi
 
           if [ -n "${{ github.event.inputs.min_new_comments }}" ]; then
-            CMD="$CMD --min-new-comments ${{ github.event.inputs.min_new_comments }}"
+            MIN_NEW_COMMENTS=$(printf "%.0f" "${{ github.event.inputs.min_new_comments }}")
+            CMD="$CMD --min-new-comments $MIN_NEW_COMMENTS"
           fi
 
           if [ "${{ github.event.inputs.reset_quota }}" == "true" ]; then
             CMD="$CMD --reset-quota"
           fi
-          
+
           echo "Running: $CMD"
           eval $CMD
 
