@@ -403,6 +403,14 @@ class PostgresConnection:
                         raise
                 else:
                     log.error(f"Non-retryable PostgreSQL error: {e}")
+                    # Rollback to reset connection state after non-retryable error
+                    # This prevents "current transaction is aborted" cascading failures
+                    try:
+                        if self._conn:
+                            self._conn.rollback()
+                            log.debug("Transaction rolled back after non-retryable error")
+                    except Exception as rollback_err:
+                        log.warning(f"Rollback after error failed: {rollback_err}")
                     raise
 
         raise last_exception
@@ -415,6 +423,15 @@ class PostgresConnection:
     def commit(self):
         """Commit transaction with automatic retry."""
         return self._execute_with_retry("commit")
+
+    def rollback(self):
+        """Rollback the current transaction to reset connection state."""
+        with self._lock:
+            if self._conn:
+                try:
+                    self._conn.rollback()
+                except Exception as e:
+                    log.warning(f"Rollback failed: {e}")
 
     def executemany(self, sql: str, parameters_list: list):
         """Execute SQL with multiple parameter sets (batch operation)."""
@@ -703,8 +720,25 @@ def init_database(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_channel_published ON videos(channel_id, published_at)")
     # Optimizes queries like "get comments on video X after date Y"
     conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_video_published ON comments(video_id, published_at)")
-    
+    # Optimizes finding latest stats for a video (used in ROW_NUMBER queries)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_video_stats_video_fetched ON video_stats(video_id, fetched_at DESC)")
+
+    # Summary table for fast comment/stats lookups
+    # Eliminates expensive COUNT(*) and MAX() aggregations on comments table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS video_comment_summary (
+            video_id TEXT PRIMARY KEY,
+            stored_comment_count INTEGER DEFAULT 0,
+            last_comment_fetch TEXT,
+            latest_youtube_comment_count INTEGER,
+            last_stats_fetch TEXT
+        )
+    """)
+
     conn.commit()
+
+    # Backfill summary table with existing data (no-op if already populated)
+    backfill_comment_summary(conn)
 
 
 def init_database_postgres(conn) -> None:
@@ -889,8 +923,84 @@ def init_database_postgres(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_channel_stats_fetched ON channel_stats(fetched_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_channel_published ON videos(channel_id, published_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_video_published ON comments(video_id, published_at)")
+    # Optimizes finding latest stats for a video (used in ROW_NUMBER queries)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_video_stats_video_fetched ON video_stats(video_id, fetched_at DESC)")
+
+    # Summary table for fast comment/stats lookups
+    # Eliminates expensive COUNT(*) and MAX() aggregations on comments table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS video_comment_summary (
+            video_id TEXT PRIMARY KEY,
+            stored_comment_count INTEGER DEFAULT 0,
+            last_comment_fetch TEXT,
+            latest_youtube_comment_count INTEGER,
+            last_stats_fetch TEXT
+        )
+    """)
 
     conn.commit()
+
+    # Backfill summary table with existing data (no-op if already populated)
+    backfill_comment_summary(conn)
+
+
+def backfill_comment_summary(conn) -> int:
+    """Backfill video_comment_summary table from existing data.
+
+    This should be run once after adding the summary table to populate
+    it with data from existing comments and video_stats records.
+
+    Returns:
+        Number of videos updated
+    """
+    log.info("Backfilling video_comment_summary table...")
+
+    # Get all videos that have stats or comments but no summary record
+    # This query populates the summary with:
+    # - stored_comment_count: COUNT of comments per video
+    # - last_comment_fetch: MAX(fetched_at) from comments
+    # - latest_youtube_comment_count: comment_count from latest video_stats
+    # - last_stats_fetch: MAX(fetched_at) from video_stats
+    conn.execute("""
+        INSERT INTO video_comment_summary (
+            video_id,
+            stored_comment_count,
+            last_comment_fetch,
+            latest_youtube_comment_count,
+            last_stats_fetch
+        )
+        SELECT
+            v.video_id,
+            COALESCE(c.comment_count, 0),
+            c.last_fetch,
+            vs.comment_count,
+            vs.last_fetch
+        FROM videos v
+        LEFT JOIN (
+            SELECT video_id, COUNT(*) as comment_count, MAX(fetched_at) as last_fetch
+            FROM comments
+            GROUP BY video_id
+        ) c ON v.video_id = c.video_id
+        LEFT JOIN (
+            SELECT s.video_id, s.comment_count, s.fetched_at as last_fetch
+            FROM video_stats s
+            INNER JOIN (
+                SELECT video_id, MAX(fetched_at) as max_fetch
+                FROM video_stats
+                GROUP BY video_id
+            ) latest ON s.video_id = latest.video_id AND s.fetched_at = latest.max_fetch
+        ) vs ON v.video_id = vs.video_id
+        WHERE v.video_id NOT IN (SELECT video_id FROM video_comment_summary)
+        AND (c.comment_count > 0 OR vs.comment_count IS NOT NULL)
+    """)
+
+    # Get count of inserted rows
+    result = conn.execute("SELECT changes()").fetchone()
+    count = result[0] if result else 0
+
+    conn.commit()
+    log.info(f"Backfilled {count} videos into video_comment_summary")
+    return count
 
 
 # ============================================================================
@@ -1070,36 +1180,37 @@ def get_videos_needing_comments(
 
     refresh_hours_case = "CASE " + " ".join(case_parts) + " ELSE 168 END"
 
-    # Single optimized query that handles all tiers at once
+    # Optimized query using video_comment_summary table
+    # This eliminates expensive window functions and COUNT aggregations
     query = f"""
         SELECT v.video_id, v.published_at,
-               COALESCE(vs.comment_count, 0) as youtube_count,
-               COALESCE(stored.stored_count, 0) as stored_count,
+               COALESCE(s.latest_youtube_comment_count, 0) as youtube_count,
+               COALESCE(s.stored_comment_count, 0) as stored_count,
                ({refresh_hours_case}) as tier_refresh_hours
         FROM videos v
-        LEFT JOIN (
-            SELECT video_id, comment_count,
-                   ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY fetched_at DESC) as rn
-            FROM video_stats
-        ) vs ON v.video_id = vs.video_id AND vs.rn = 1
-        LEFT JOIN (
-            SELECT video_id, COUNT(*) as stored_count, MAX(fetched_at) as last_fetch
-            FROM comments
-            GROUP BY video_id
-        ) stored ON v.video_id = stored.video_id
+        LEFT JOIN video_comment_summary s ON v.video_id = s.video_id
         WHERE v.channel_id = ?
-        AND COALESCE(vs.comment_count, 0) > COALESCE(stored.stored_count, 0)
-        AND (COALESCE(vs.comment_count, 0) - COALESCE(stored.stored_count, 0)) >= ?
+        AND COALESCE(s.latest_youtube_comment_count, 0) > COALESCE(s.stored_comment_count, 0)
+        AND (COALESCE(s.latest_youtube_comment_count, 0) - COALESCE(s.stored_comment_count, 0)) >= ?
         AND (
-            stored.last_fetch IS NULL
-            OR datetime(stored.last_fetch) < datetime('now', '-' || ({refresh_hours_case}) || ' hours')
+            s.last_comment_fetch IS NULL
+            OR datetime(s.last_comment_fetch) < datetime('now', '-' || ({refresh_hours_case}) || ' hours')
         )
         ORDER BY v.published_at DESC
     """
     if limit is not None:
         query += f" LIMIT {limit}"
 
+    log.debug(f"Querying videos needing comments for channel {channel_id}")
+    start_time = time.time()
     videos = conn.execute(query, (channel_id, min_new_comments)).fetchall()
+    elapsed = time.time() - start_time
+
+    if elapsed > 5.0:
+        log.warning(f"Slow query in get_videos_needing_comments: {elapsed:.1f}s for channel {channel_id}")
+    else:
+        log.debug(f"Query completed in {elapsed:.1f}s")
+
     video_ids = [row[0] for row in videos]
 
     # Log tier breakdown for debugging
@@ -1179,27 +1290,33 @@ def get_videos_needing_stats_update(
 
     refresh_hours_case = "CASE " + " ".join(case_parts) + " ELSE 24 END"
 
-    # Single optimized query that handles all tiers at once
+    # Optimized query using video_comment_summary table
+    # This eliminates expensive GROUP BY aggregation on video_stats
     query = f"""
         SELECT v.video_id, v.published_at,
                ({refresh_hours_case}) as tier_refresh_hours
         FROM videos v
-        LEFT JOIN (
-            SELECT video_id, MAX(fetched_at) as last_fetch
-            FROM video_stats
-            GROUP BY video_id
-        ) vs ON v.video_id = vs.video_id
+        LEFT JOIN video_comment_summary s ON v.video_id = s.video_id
         WHERE v.channel_id = ?
         AND (
-            vs.last_fetch IS NULL
-            OR datetime(vs.last_fetch) < datetime('now', '-' || ({refresh_hours_case}) || ' hours')
+            s.last_stats_fetch IS NULL
+            OR datetime(s.last_stats_fetch) < datetime('now', '-' || ({refresh_hours_case}) || ' hours')
         )
         ORDER BY v.published_at DESC
     """
     if limit is not None:
         query += f" LIMIT {limit}"
 
+    log.debug(f"Querying videos needing stats for channel {channel_id}")
+    start_time = time.time()
     videos = conn.execute(query, (channel_id,)).fetchall()
+    elapsed = time.time() - start_time
+
+    if elapsed > 5.0:
+        log.warning(f"Slow query in get_videos_needing_stats_update: {elapsed:.1f}s for channel {channel_id}")
+    else:
+        log.debug(f"Query completed in {elapsed:.1f}s")
+
     video_ids = [row[0] for row in videos]
 
     # Log tier breakdown for debugging
@@ -1426,8 +1543,13 @@ def upsert_video(conn, video: dict, commit: bool = True) -> None:
 
 
 def insert_video_stats(conn, video_id: str, stats: dict, commit: bool = True) -> None:
-    """Insert video stats snapshot."""
+    """Insert video stats snapshot.
+
+    Also updates video_comment_summary with latest YouTube comment count.
+    """
     now = datetime.now().isoformat()
+    comment_count = stats.get('comment_count', 0)
+
     conn.execute("""
         INSERT OR IGNORE INTO video_stats (video_id, fetched_at, view_count, like_count, comment_count)
         VALUES (?, ?, ?, ?, ?)
@@ -1436,8 +1558,18 @@ def insert_video_stats(conn, video_id: str, stats: dict, commit: bool = True) ->
         now,
         stats.get('view_count', 0),
         stats.get('like_count', 0),
-        stats.get('comment_count', 0)
+        comment_count
     ))
+
+    # Update summary table with latest YouTube comment count
+    conn.execute("""
+        INSERT INTO video_comment_summary (video_id, latest_youtube_comment_count, last_stats_fetch)
+        VALUES (?, ?, ?)
+        ON CONFLICT(video_id) DO UPDATE SET
+            latest_youtube_comment_count = excluded.latest_youtube_comment_count,
+            last_stats_fetch = excluded.last_stats_fetch
+    """, (video_id, comment_count, now))
+
     if commit:
         conn.commit()
 
@@ -1446,6 +1578,7 @@ def insert_video_stats_batch(conn, video_stats: list[tuple[str, dict]]) -> int:
     """Insert multiple video stats in a batch operation.
 
     Uses executemany with the TursoConnection wrapper for reliable retry logic.
+    Also updates video_comment_summary with latest YouTube comment counts.
 
     Args:
         conn: Database connection with retry support
@@ -1475,6 +1608,20 @@ def insert_video_stats_batch(conn, video_stats: list[tuple[str, dict]]) -> int:
         "INSERT OR IGNORE INTO video_stats (video_id, fetched_at, view_count, like_count, comment_count) VALUES (?, ?, ?, ?, ?)",
         params
     )
+
+    # Update summary table with latest YouTube comment counts
+    summary_params = [
+        (video_id, stats.get('comment_count', 0), now)
+        for video_id, stats in video_stats
+    ]
+    conn.executemany("""
+        INSERT INTO video_comment_summary (video_id, latest_youtube_comment_count, last_stats_fetch)
+        VALUES (?, ?, ?)
+        ON CONFLICT(video_id) DO UPDATE SET
+            latest_youtube_comment_count = excluded.latest_youtube_comment_count,
+            last_stats_fetch = excluded.last_stats_fetch
+    """, summary_params)
+
     conn.commit()
 
     return len(video_stats)
@@ -1645,7 +1792,10 @@ def insert_transcript(conn, video_id: str, transcript: dict) -> bool:
 
 
 def insert_comments(conn, comments: list[dict]) -> int:
-    """Insert comments, skip duplicates. Returns count of new comments."""
+    """Insert comments, skip duplicates. Returns count of new comments.
+
+    Also updates video_comment_summary table for fast lookups.
+    """
     if not comments:
         return 0
 
@@ -1666,10 +1816,32 @@ def insert_comments(conn, comments: list[dict]) -> int:
         for c in comments
     ])
 
+    new_count = cursor.rowcount
+
+    # Update summary table for each video in this batch
+    # Comments are typically all for one video, but handle multiple just in case
+    video_ids = set(c['video_id'] for c in comments)
+    for video_id in video_ids:
+        # Get current stored count for this video (uses idx_comments_video index)
+        result = conn.execute(
+            "SELECT COUNT(*) FROM comments WHERE video_id = ?",
+            (video_id,)
+        ).fetchone()
+        stored_count = result[0] if result else 0
+
+        # Upsert the summary
+        conn.execute("""
+            INSERT INTO video_comment_summary (video_id, stored_comment_count, last_comment_fetch)
+            VALUES (?, ?, ?)
+            ON CONFLICT(video_id) DO UPDATE SET
+                stored_comment_count = excluded.stored_comment_count,
+                last_comment_fetch = excluded.last_comment_fetch
+        """, (video_id, stored_count, now))
+
     conn.commit()
 
     # rowcount returns number of rows actually inserted (ignored duplicates not counted)
-    return cursor.rowcount
+    return new_count
 
 
 def upsert_playlist(conn, playlist: dict) -> None:
