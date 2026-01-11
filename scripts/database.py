@@ -1794,6 +1794,7 @@ def insert_comments(conn, comments: list[dict]) -> int:
     """Insert comments, skip duplicates. Returns count of new comments.
 
     Also updates video_comment_summary table for fast lookups.
+    Uses O(1) increment instead of O(n) COUNT(*) for efficiency.
     """
     if not comments:
         return 0
@@ -1801,7 +1802,6 @@ def insert_comments(conn, comments: list[dict]) -> int:
     now = datetime.now().isoformat()
 
     # Batch insert with INSERT OR IGNORE (skips duplicates via PRIMARY KEY)
-    # Use cursor.rowcount to get inserted count without expensive table scans
     cursor = conn.executemany("""
         INSERT OR IGNORE INTO comments (
             comment_id, video_id, parent_comment_id, author_display_name,
@@ -1817,29 +1817,34 @@ def insert_comments(conn, comments: list[dict]) -> int:
 
     new_count = cursor.rowcount
 
-    # Update summary table for each video in this batch
-    # Comments are typically all for one video, but handle multiple just in case
-    video_ids = set(c['video_id'] for c in comments)
-    for video_id in video_ids:
-        # Get current stored count for this video (uses idx_comments_video index)
-        result = conn.execute(
-            "SELECT COUNT(*) FROM comments WHERE video_id = ?",
-            (video_id,)
-        ).fetchone()
-        stored_count = result[0] if result else 0
+    # Count comments per video from input batch
+    video_comment_counts: dict[str, int] = {}
+    for c in comments:
+        vid = c['video_id']
+        video_comment_counts[vid] = video_comment_counts.get(vid, 0) + 1
 
-        # Upsert the summary
+    # Update summary table - increment stored count instead of re-counting
+    # For single-video batches (common case), use actual rowcount for accuracy
+    # For multi-video batches, use input count per video (duplicates are rare)
+    for video_id, input_count in video_comment_counts.items():
+        if len(video_comment_counts) == 1:
+            # Single video: use actual inserted count from rowcount
+            increment = new_count
+        else:
+            # Multiple videos: use input count as approximation
+            increment = input_count
+
+        # O(1) upsert with increment - no COUNT(*) needed
         conn.execute("""
             INSERT INTO video_comment_summary (video_id, stored_comment_count, last_comment_fetch)
             VALUES (?, ?, ?)
             ON CONFLICT(video_id) DO UPDATE SET
-                stored_comment_count = excluded.stored_comment_count,
+                stored_comment_count = stored_comment_count + ?,
                 last_comment_fetch = excluded.last_comment_fetch
-        """, (video_id, stored_count, now))
+        """, (video_id, increment, now, increment))
 
     conn.commit()
 
-    # rowcount returns number of rows actually inserted (ignored duplicates not counted)
     return new_count
 
 
