@@ -1088,6 +1088,7 @@ def get_videos_needing_comments(
     refresh_hours_case = "CASE " + " ".join(case_parts) + " ELSE 168 END"
 
     # Single optimized query that handles all tiers at once
+    # Subqueries are filtered by channel to avoid full table scans
     query = f"""
         SELECT v.video_id, v.published_at,
                COALESCE(vs.comment_count, 0) as youtube_count,
@@ -1095,14 +1096,18 @@ def get_videos_needing_comments(
                ({refresh_hours_case}) as tier_refresh_hours
         FROM videos v
         LEFT JOIN (
-            SELECT video_id, comment_count,
-                   ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY fetched_at DESC) as rn
-            FROM video_stats
+            SELECT s.video_id, s.comment_count,
+                   ROW_NUMBER() OVER (PARTITION BY s.video_id ORDER BY s.fetched_at DESC) as rn
+            FROM video_stats s
+            INNER JOIN videos vf ON s.video_id = vf.video_id
+            WHERE vf.channel_id = ?
         ) vs ON v.video_id = vs.video_id AND vs.rn = 1
         LEFT JOIN (
-            SELECT video_id, COUNT(*) as stored_count, MAX(fetched_at) as last_fetch
-            FROM comments
-            GROUP BY video_id
+            SELECT c.video_id, COUNT(*) as stored_count, MAX(c.fetched_at) as last_fetch
+            FROM comments c
+            INNER JOIN videos vf ON c.video_id = vf.video_id
+            WHERE vf.channel_id = ?
+            GROUP BY c.video_id
         ) stored ON v.video_id = stored.video_id
         WHERE v.channel_id = ?
         AND COALESCE(vs.comment_count, 0) > COALESCE(stored.stored_count, 0)
@@ -1118,7 +1123,7 @@ def get_videos_needing_comments(
 
     log.debug(f"Querying videos needing comments for channel {channel_id}")
     start_time = time.time()
-    videos = conn.execute(query, (channel_id, min_new_comments)).fetchall()
+    videos = conn.execute(query, (channel_id, channel_id, channel_id, min_new_comments)).fetchall()
     elapsed = time.time() - start_time
 
     if elapsed > 5.0:
@@ -1206,14 +1211,17 @@ def get_videos_needing_stats_update(
     refresh_hours_case = "CASE " + " ".join(case_parts) + " ELSE 24 END"
 
     # Single optimized query that handles all tiers at once
+    # Subquery filtered by channel to avoid full table scan
     query = f"""
         SELECT v.video_id, v.published_at,
                ({refresh_hours_case}) as tier_refresh_hours
         FROM videos v
         LEFT JOIN (
-            SELECT video_id, MAX(fetched_at) as last_fetch
-            FROM video_stats
-            GROUP BY video_id
+            SELECT s.video_id, MAX(s.fetched_at) as last_fetch
+            FROM video_stats s
+            INNER JOIN videos vf ON s.video_id = vf.video_id
+            WHERE vf.channel_id = ?
+            GROUP BY s.video_id
         ) vs ON v.video_id = vs.video_id
         WHERE v.channel_id = ?
         AND (
@@ -1227,7 +1235,7 @@ def get_videos_needing_stats_update(
 
     log.debug(f"Querying videos needing stats for channel {channel_id}")
     start_time = time.time()
-    videos = conn.execute(query, (channel_id,)).fetchall()
+    videos = conn.execute(query, (channel_id, channel_id)).fetchall()
     elapsed = time.time() - start_time
 
     if elapsed > 5.0:
