@@ -961,7 +961,7 @@ def backfill_comment_summary(conn) -> int:
     # - last_comment_fetch: MAX(fetched_at) from comments
     # - latest_youtube_comment_count: comment_count from latest video_stats
     # - last_stats_fetch: MAX(fetched_at) from video_stats
-    conn.execute("""
+    cursor = conn.execute("""
         INSERT INTO video_comment_summary (
             video_id,
             stored_comment_count,
@@ -994,9 +994,8 @@ def backfill_comment_summary(conn) -> int:
         AND (c.comment_count > 0 OR vs.comment_count IS NOT NULL)
     """)
 
-    # Get count of inserted rows
-    result = conn.execute("SELECT changes()").fetchone()
-    count = result[0] if result else 0
+    # Get count of inserted rows (works for both SQLite and PostgreSQL)
+    count = cursor.rowcount if cursor.rowcount >= 0 else 0
 
     conn.commit()
     log.info(f"Backfilled {count} videos into video_comment_summary")
