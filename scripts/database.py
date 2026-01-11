@@ -1116,7 +1116,16 @@ def get_videos_needing_comments(
     if limit is not None:
         query += f" LIMIT {limit}"
 
+    log.debug(f"Querying videos needing comments for channel {channel_id}")
+    start_time = time.time()
     videos = conn.execute(query, (channel_id, min_new_comments)).fetchall()
+    elapsed = time.time() - start_time
+
+    if elapsed > 5.0:
+        log.warning(f"Slow query in get_videos_needing_comments: {elapsed:.1f}s for channel {channel_id}")
+    else:
+        log.debug(f"Query completed in {elapsed:.1f}s")
+
     video_ids = [row[0] for row in videos]
 
     # Log tier breakdown for debugging
@@ -1216,7 +1225,16 @@ def get_videos_needing_stats_update(
     if limit is not None:
         query += f" LIMIT {limit}"
 
+    log.debug(f"Querying videos needing stats for channel {channel_id}")
+    start_time = time.time()
     videos = conn.execute(query, (channel_id,)).fetchall()
+    elapsed = time.time() - start_time
+
+    if elapsed > 5.0:
+        log.warning(f"Slow query in get_videos_needing_stats_update: {elapsed:.1f}s for channel {channel_id}")
+    else:
+        log.debug(f"Query completed in {elapsed:.1f}s")
+
     video_ids = [row[0] for row in videos]
 
     # Log tier breakdown for debugging
