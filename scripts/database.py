@@ -1905,7 +1905,7 @@ def insert_comments(conn, comments: list[dict]) -> int:
             INSERT INTO video_comment_summary (video_id, stored_comment_count, last_comment_fetch)
             VALUES (?, ?, ?)
             ON CONFLICT(video_id) DO UPDATE SET
-                stored_comment_count = stored_comment_count + ?,
+                stored_comment_count = video_comment_summary.stored_comment_count + ?,
                 last_comment_fetch = excluded.last_comment_fetch
         """, (video_id, increment, now, increment))
 
