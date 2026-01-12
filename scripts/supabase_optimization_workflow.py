@@ -133,12 +133,12 @@ class SupabaseOptimizationWorkflow:
             # Get table sizes
             tables_query = """
                 SELECT
-                    tablename,
-                    pg_total_relation_size(schemaname||'.'||tablename)::numeric / 1024.0 / 1024.0 as size_mb,
+                    pg_tables.tablename,
+                    pg_total_relation_size(pg_tables.schemaname||'.'||pg_tables.tablename)::numeric / 1024.0 / 1024.0 as size_mb,
                     n_live_tup as row_count
                 FROM pg_tables
                 LEFT JOIN pg_stat_user_tables ON pg_tables.tablename = pg_stat_user_tables.relname
-                WHERE schemaname = 'public'
+                WHERE pg_tables.schemaname = 'public'
                 ORDER BY size_mb DESC
             """
 
