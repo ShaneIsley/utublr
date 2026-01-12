@@ -61,7 +61,6 @@ try:
     from youtube_transcript_api import YouTubeTranscriptApi
     from youtube_transcript_api._errors import (
         NoTranscriptFound,
-        NoTranscriptAvailable,
         TranscriptsDisabled,
         VideoUnavailable,
     )
@@ -207,8 +206,6 @@ def fetch_transcript(video_id: str, languages: list = None) -> dict:
         return {"available": False, "reason": "Transcripts disabled by uploader"}
     except VideoUnavailable:
         return {"available": False, "reason": "Video unavailable"}
-    except NoTranscriptAvailable:
-        return {"available": False, "reason": "No transcripts available"}
     except Exception as e:
         error_msg = str(e)
         # Check for IP blocking
