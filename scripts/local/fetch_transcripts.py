@@ -45,8 +45,8 @@ import time
 from datetime import datetime
 from typing import Optional
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add scripts directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from logger import get_logger
 from database import get_connection, init_database, insert_transcript
