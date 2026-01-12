@@ -18,8 +18,14 @@ A production-ready system for tracking YouTube channel metadata over time using 
 
 ### 1. Install Dependencies
 
+This project uses [uv](https://docs.astral.sh/uv/) for fast Python package management.
+
 ```bash
-pip install -r requirements.txt
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install dependencies
+uv sync
 ```
 
 ### 2. Set Up Turso Database
@@ -52,16 +58,14 @@ cp config/channels.example.yaml config/channels.yaml
 ### 5. Run
 
 ```bash
-cd scripts
-
 # Dry run first to see what would happen
-python fetch.py --config ../config/channels.yaml --dry-run
+uv run scripts/fetch.py --config config/channels.yaml --dry-run
 
 # Actual fetch
-python fetch.py --config ../config/channels.yaml --backfill
+uv run scripts/fetch.py --config config/channels.yaml --backfill
 
 # Fetch transcripts locally (YouTube blocks cloud IPs)
-python local/fetch_transcripts.py --channel @YourChannel
+uv run scripts/local/fetch_transcripts.py --channel @YourChannel
 ```
 
 ## Scripts
@@ -72,27 +76,27 @@ Fetches channel metadata, video info, stats, and comments via YouTube API.
 
 ```bash
 # Basic usage
-python fetch.py --channel @GoogleDevelopers
-python fetch.py --config ../config/channels.yaml
+uv run scripts/fetch.py --channel @GoogleDevelopers
+uv run scripts/fetch.py --config config/channels.yaml
 
 # Dry run (preview without fetching)
-python fetch.py --config ../config/channels.yaml --dry-run
+uv run scripts/fetch.py --config config/channels.yaml --dry-run
 
 # Backfill mode (fetch everything, ignore incremental)
-python fetch.py --channel @GoogleDevelopers --backfill
+uv run scripts/fetch.py --channel @GoogleDevelopers --backfill
 
 # With limits
-python fetch.py --channel @GoogleDevelopers \
+uv run scripts/fetch.py --channel @GoogleDevelopers \
     --max-videos 500 \
     --max-video-age 90 \
     --max-comments 100 \
     --max-replies 10
 
 # Skip comments to save quota
-python fetch.py --config ../config/channels.yaml --skip-comments
+uv run scripts/fetch.py --config config/channels.yaml --skip-comments
 
 # Export to CSV
-python fetch.py --export
+uv run scripts/fetch.py --export
 ```
 
 ### local/fetch_transcripts.py - Transcript Fetcher (run locally)
@@ -102,55 +106,55 @@ transcript requests from cloud/CI IP addresses.
 
 ```bash
 # Fetch all missing transcripts
-python local/fetch_transcripts.py
+uv run scripts/local/fetch_transcripts.py
 
 # Fetch for specific channel
-python local/fetch_transcripts.py --channel @samwitteveenai
-python local/fetch_transcripts.py --channel UC55ODQSvARtgSyc8ThfiepQ
+uv run scripts/local/fetch_transcripts.py --channel @samwitteveenai
+uv run scripts/local/fetch_transcripts.py --channel UC55ODQSvARtgSyc8ThfiepQ
 
 # Fetch specific videos
-python local/fetch_transcripts.py --video VIDEO_ID1 VIDEO_ID2
+uv run scripts/local/fetch_transcripts.py --video VIDEO_ID1 VIDEO_ID2
 
 # Limit number to fetch
-python local/fetch_transcripts.py --limit 100
+uv run scripts/local/fetch_transcripts.py --limit 100
 
 # Slower rate limiting (default: 1 req/sec)
-python local/fetch_transcripts.py --delay 2.0
+uv run scripts/local/fetch_transcripts.py --delay 2.0
 
 # Test mode (don't save to database)
-python local/fetch_transcripts.py --dry-run --limit 10
+uv run scripts/local/fetch_transcripts.py --dry-run --limit 10
 ```
 
 ### analyse.py - Reports and Analysis
 
 ```bash
 # List available reports
-python analyse.py --list-reports
+uv run scripts/analyse.py --list-reports
 
 # Run preset reports
-python analyse.py --report summary
-python analyse.py --report channels
-python analyse.py --report growth
-python analyse.py --report top-videos
+uv run scripts/analyse.py --report summary
+uv run scripts/analyse.py --report channels
+uv run scripts/analyse.py --report growth
+uv run scripts/analyse.py --report top-videos
 
 # Custom SQL
-python analyse.py --sql "SELECT title, view_count FROM videos ORDER BY view_count DESC LIMIT 10"
+uv run scripts/analyse.py --sql "SELECT title, view_count FROM videos ORDER BY view_count DESC LIMIT 10"
 
 # Export to CSV
-python analyse.py --report growth --output growth.csv
+uv run scripts/analyse.py --report growth --output growth.csv
 ```
 
 ### local/test_transcript.py - Transcript Debugging
 
 ```bash
 # Test specific video
-python local/test_transcript.py VIDEO_ID
+uv run scripts/local/test_transcript.py VIDEO_ID
 
 # Test videos from a channel
-python local/test_transcript.py --channel @samwitteveenai --limit 20
+uv run scripts/local/test_transcript.py --channel @samwitteveenai --limit 20
 
 # Quick summary only
-python local/test_transcript.py --channel @samwitteveenai --limit 50 --quiet
+uv run scripts/local/test_transcript.py --channel @samwitteveenai --limit 50 --quiet
 ```
 
 ## Command Line Options
@@ -252,7 +256,7 @@ logs/
 - Summary report in Actions UI
 
 **Note:** Transcripts cannot be fetched in GitHub Actions (YouTube blocks cloud IPs).
-Run `local/fetch_transcripts.py` locally after the automated fetch completes.
+Run `uv run scripts/local/fetch_transcripts.py` locally after the automated fetch completes.
 
 ### 3. JWT Token Management
 
@@ -435,11 +439,11 @@ settings:
 ### "Quota exhausted"
 - Quota is tracked in the database and resets at midnight
 - Use `--skip-comments` to reduce usage
-- Check usage with `python analyse.py --report summary`
+- Check usage with `uv run scripts/analyse.py --report summary`
 
 ### "All transcripts unavailable"
 - Transcripts must be fetched locally, not from CI/cloud
-- Run `python local/fetch_transcripts.py` from your local machine
+- Run `uv run scripts/local/fetch_transcripts.py` from your local machine
 - Use `--dry-run` to test before saving
 
 ### "YOUTUBE_API_KEY not provided"
