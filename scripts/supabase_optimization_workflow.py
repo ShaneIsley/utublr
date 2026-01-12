@@ -38,7 +38,7 @@ from typing import Dict, List, Optional
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from scripts.database import get_connection, get_cursor, is_postgres
+from scripts.database import get_connection, is_postgres
 from scripts.optimize_database_postgres import PostgresOptimizer
 
 # Configure logging
@@ -63,7 +63,6 @@ class SupabaseOptimizationWorkflow:
         self.dry_run = dry_run
         self.quiet = quiet
         self.conn = get_connection()
-        self.cursor = get_cursor()
         self.workflow_id = f"opt_{datetime.now():%Y%m%d_%H%M%S}"
         self.report = {
             'workflow_id': self.workflow_id,
@@ -91,7 +90,7 @@ class SupabaseOptimizationWorkflow:
                 raise ValueError("This workflow requires PostgreSQL backend")
 
             # Test connection
-            result = self.cursor.execute("SELECT version(), current_database()").fetchone()
+            result = self.conn.execute("SELECT version(), current_database()").fetchone()
             db_version = result[0]
             db_name = result[1]
 
@@ -126,7 +125,7 @@ class SupabaseOptimizationWorkflow:
 
         try:
             # Get database size
-            result = self.cursor.execute(
+            result = self.conn.execute(
                 "SELECT pg_database_size(current_database()) / 1024.0 / 1024.0"
             ).fetchone()
             analysis['total_size_mb'] = float(result[0])
@@ -143,7 +142,7 @@ class SupabaseOptimizationWorkflow:
                 ORDER BY size_mb DESC
             """
 
-            for row in self.cursor.execute(tables_query).fetchall():
+            for row in self.conn.execute(tables_query).fetchall():
                 table_name = row[0]
                 size_mb = float(row[1])
                 row_count = row[2] or 0
@@ -167,7 +166,7 @@ class SupabaseOptimizationWorkflow:
                         )
                         SELECT * FROM duplicate_check
                     """
-                    result = self.cursor.execute(query).fetchone()
+                    result = self.conn.execute(query).fetchone()
 
                     if result:
                         total_rows = result[0]
@@ -278,7 +277,7 @@ class SupabaseOptimizationWorkflow:
 
             all_passed = True
             for check_name, query in orphan_checks:
-                result = self.cursor.execute(query).fetchone()
+                result = self.conn.execute(query).fetchone()
                 count = result[0] if result else 0
 
                 checks.append({

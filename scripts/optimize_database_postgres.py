@@ -33,7 +33,7 @@ from typing import Dict, List, Tuple, Optional
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from scripts.database import get_connection, get_cursor, is_postgres
+from scripts.database import get_connection, is_postgres
 
 # Configure logging
 logging.basicConfig(
@@ -52,7 +52,6 @@ class PostgresOptimizer:
 
         self.dry_run = dry_run
         self.conn = get_connection()
-        self.cursor = get_cursor()
         self.stats = {
             'video_stats_removed': 0,
             'channel_stats_removed': 0,
@@ -67,7 +66,7 @@ class PostgresOptimizer:
     def get_database_size(self) -> float:
         """Get current database size in MB"""
         query = "SELECT pg_database_size(current_database()) / 1024.0 / 1024.0 as size_mb"
-        result = self.cursor.execute(query).fetchone()
+        result = self.conn.execute(query).fetchone()
         return result[0] if result else 0
 
     def get_table_sizes(self) -> Dict[str, float]:
@@ -81,7 +80,7 @@ class PostgresOptimizer:
             ORDER BY size_mb DESC
         """
 
-        results = self.cursor.execute(query).fetchall()
+        results = self.conn.execute(query).fetchall()
         return {row[0]: float(row[1]) for row in results}
 
     def compress_video_stats(self) -> int:
@@ -118,7 +117,7 @@ class PostgresOptimizer:
             AND comment_count = prev_comments
         """
 
-        result = self.cursor.execute(duplicates_query).fetchone()
+        result = self.conn.execute(duplicates_query).fetchone()
         duplicates = result[0] if result else 0
         logger.info(f"Found {duplicates:,} duplicate stats entries")
 
@@ -147,7 +146,7 @@ class PostgresOptimizer:
                     AND comment_count = prev_comments
                 )
             """
-            self.cursor.execute(delete_duplicates)
+            self.conn.execute(delete_duplicates)
             self.conn.commit()
             logger.info(f"Removed {duplicates:,} duplicate entries")
 
@@ -167,7 +166,7 @@ class PostgresOptimizer:
                 GROUP BY video_id, DATE(fetched_at)
             )
         """
-        result = self.cursor.execute(
+        result = self.conn.execute(
             old_hourly_query,
             (cutoff_90_days, cutoff_30_days, cutoff_90_days, cutoff_30_days)
         ).fetchone()
@@ -185,7 +184,7 @@ class PostgresOptimizer:
                     GROUP BY video_id, DATE(fetched_at)
                 )
             """
-            self.cursor.execute(delete_hourly, (cutoff_90_days, cutoff_30_days, cutoff_90_days, cutoff_30_days))
+            self.conn.execute(delete_hourly, (cutoff_90_days, cutoff_30_days, cutoff_90_days, cutoff_30_days))
             self.conn.commit()
             logger.info(f"Removed {old_hourly:,} old hourly snapshots")
 
@@ -200,7 +199,7 @@ class PostgresOptimizer:
                 GROUP BY video_id, EXTRACT(YEAR FROM fetched_at), EXTRACT(WEEK FROM fetched_at)
             )
         """
-        result = self.cursor.execute(
+        result = self.conn.execute(
             old_daily_query,
             (cutoff_365_days, cutoff_90_days, cutoff_365_days, cutoff_90_days)
         ).fetchone()
@@ -218,7 +217,7 @@ class PostgresOptimizer:
                     GROUP BY video_id, EXTRACT(YEAR FROM fetched_at), EXTRACT(WEEK FROM fetched_at)
                 )
             """
-            self.cursor.execute(delete_daily, (cutoff_365_days, cutoff_90_days, cutoff_365_days, cutoff_90_days))
+            self.conn.execute(delete_daily, (cutoff_365_days, cutoff_90_days, cutoff_365_days, cutoff_90_days))
             self.conn.commit()
             logger.info(f"Removed {old_daily:,} old daily snapshots")
 
@@ -233,7 +232,7 @@ class PostgresOptimizer:
                 GROUP BY video_id, EXTRACT(YEAR FROM fetched_at), EXTRACT(MONTH FROM fetched_at)
             )
         """
-        result = self.cursor.execute(old_weekly_query, (cutoff_365_days, cutoff_365_days)).fetchone()
+        result = self.conn.execute(old_weekly_query, (cutoff_365_days, cutoff_365_days)).fetchone()
         old_weekly = result[0] if result else 0
         logger.info(f"Found {old_weekly:,} weekly snapshots older than 365 days (will keep monthly)")
 
@@ -248,7 +247,7 @@ class PostgresOptimizer:
                     GROUP BY video_id, EXTRACT(YEAR FROM fetched_at), EXTRACT(MONTH FROM fetched_at)
                 )
             """
-            self.cursor.execute(delete_weekly, (cutoff_365_days, cutoff_365_days))
+            self.conn.execute(delete_weekly, (cutoff_365_days, cutoff_365_days))
             self.conn.commit()
             logger.info(f"Removed {old_weekly:,} old weekly snapshots")
 
@@ -289,7 +288,7 @@ class PostgresOptimizer:
             AND video_count = prev_videos
         """
 
-        result = self.cursor.execute(duplicates_query).fetchone()
+        result = self.conn.execute(duplicates_query).fetchone()
         duplicates = result[0] if result else 0
         logger.info(f"Found {duplicates:,} duplicate channel stats entries")
 
@@ -317,7 +316,7 @@ class PostgresOptimizer:
                     AND video_count = prev_videos
                 )
             """
-            self.cursor.execute(delete_duplicates)
+            self.conn.execute(delete_duplicates)
             self.conn.commit()
             logger.info(f"Removed {duplicates:,} duplicate entries")
 
@@ -327,7 +326,7 @@ class PostgresOptimizer:
         cutoff_365_days = datetime.now() - timedelta(days=365)
 
         # Keep daily for 30-90 days
-        result = self.cursor.execute("""
+        result = self.conn.execute("""
             SELECT COUNT(*) FROM channel_stats
             WHERE fetched_at BETWEEN %s AND %s
             AND (channel_id, fetched_at) NOT IN (
@@ -340,7 +339,7 @@ class PostgresOptimizer:
         old_hourly = result[0] if result else 0
 
         if old_hourly > 0 and not self.dry_run:
-            self.cursor.execute("""
+            self.conn.execute("""
                 DELETE FROM channel_stats
                 WHERE fetched_at BETWEEN %s AND %s
                 AND (channel_id, fetched_at) NOT IN (
@@ -353,7 +352,7 @@ class PostgresOptimizer:
             self.conn.commit()
 
         # Keep weekly for 90-365 days
-        result = self.cursor.execute("""
+        result = self.conn.execute("""
             SELECT COUNT(*) FROM channel_stats
             WHERE fetched_at BETWEEN %s AND %s
             AND (channel_id, fetched_at) NOT IN (
@@ -366,7 +365,7 @@ class PostgresOptimizer:
         old_daily = result[0] if result else 0
 
         if old_daily > 0 and not self.dry_run:
-            self.cursor.execute("""
+            self.conn.execute("""
                 DELETE FROM channel_stats
                 WHERE fetched_at BETWEEN %s AND %s
                 AND (channel_id, fetched_at) NOT IN (
@@ -379,7 +378,7 @@ class PostgresOptimizer:
             self.conn.commit()
 
         # Keep monthly for > 365 days
-        result = self.cursor.execute("""
+        result = self.conn.execute("""
             SELECT COUNT(*) FROM channel_stats
             WHERE fetched_at < %s
             AND (channel_id, fetched_at) NOT IN (
@@ -392,7 +391,7 @@ class PostgresOptimizer:
         old_weekly = result[0] if result else 0
 
         if old_weekly > 0 and not self.dry_run:
-            self.cursor.execute("""
+            self.conn.execute("""
                 DELETE FROM channel_stats
                 WHERE fetched_at < %s
                 AND (channel_id, fetched_at) NOT IN (
@@ -420,7 +419,7 @@ class PostgresOptimizer:
 
         # Check if columns exist, add if needed
         try:
-            self.cursor.execute("ALTER TABLE videos ADD COLUMN thumbnail_quality TEXT")
+            self.conn.execute("ALTER TABLE videos ADD COLUMN thumbnail_quality TEXT")
             self.conn.commit()
             logger.info("Added thumbnail_quality column to videos")
         except Exception as e:
@@ -430,8 +429,8 @@ class PostgresOptimizer:
                 logger.warning(f"Could not add thumbnail_quality column: {e}")
 
         try:
-            self.cursor.execute("ALTER TABLE channels ADD COLUMN thumbnail_quality TEXT")
-            self.cursor.execute("ALTER TABLE channels ADD COLUMN banner_quality TEXT")
+            self.conn.execute("ALTER TABLE channels ADD COLUMN thumbnail_quality TEXT")
+            self.conn.execute("ALTER TABLE channels ADD COLUMN banner_quality TEXT")
             self.conn.commit()
             logger.info("Added quality columns to channels")
         except Exception as e:
@@ -447,14 +446,14 @@ class PostgresOptimizer:
             WHERE thumbnail_url IS NOT NULL
             AND (thumbnail_quality IS NULL OR thumbnail_quality = '')
         """
-        videos_to_update = self.cursor.execute(videos_query).fetchall()
+        videos_to_update = self.conn.execute(videos_query).fetchall()
         logger.info(f"Found {len(videos_to_update):,} videos with thumbnails to optimize")
 
         if not self.dry_run and len(videos_to_update) > 0:
             for video_id, thumbnail_url in videos_to_update:
                 if '/vi/' in thumbnail_url:
                     quality = thumbnail_url.split('/')[-1].replace('.jpg', '').replace('.webp', '')
-                    self.cursor.execute(
+                    self.conn.execute(
                         "UPDATE videos SET thumbnail_quality = %s WHERE video_id = %s",
                         (quality, video_id)
                     )
@@ -468,7 +467,7 @@ class PostgresOptimizer:
             WHERE (thumbnail_url IS NOT NULL OR banner_url IS NOT NULL)
             AND (thumbnail_quality IS NULL OR banner_quality IS NULL)
         """
-        channels_to_update = self.cursor.execute(channels_query).fetchall()
+        channels_to_update = self.conn.execute(channels_query).fetchall()
 
         if not self.dry_run and len(channels_to_update) > 0:
             for channel_id, thumb_url, banner_url in channels_to_update:
@@ -485,7 +484,7 @@ class PostgresOptimizer:
                     if len(parts) > 0:
                         banner_quality = parts[-1]
 
-                self.cursor.execute("""
+                self.conn.execute("""
                     UPDATE channels
                     SET thumbnail_quality = %s, banner_quality = %s
                     WHERE channel_id = %s
@@ -538,7 +537,7 @@ class PostgresOptimizer:
         for table in ['channels', 'videos', 'video_stats', 'channel_stats',
                       'comments', 'transcripts', 'chapters', 'playlists']:
             try:
-                count_result = self.cursor.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                count_result = self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
                 table_stats[table] = count_result[0] if count_result else 0
             except:
                 table_stats[table] = 0
@@ -554,7 +553,7 @@ class PostgresOptimizer:
                         COUNT(DISTINCT DATE(fetched_at)) as unique_days
                     FROM {table}
                 """
-                result = self.cursor.execute(query).fetchone()
+                result = self.conn.execute(query).fetchone()
                 if result:
                     date_ranges[table] = {
                         'earliest': str(result[0]),
