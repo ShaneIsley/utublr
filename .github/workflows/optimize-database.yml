@@ -1,0 +1,156 @@
+name: Database Optimization
+
+on:
+  # Run weekly on Sunday at 3 AM UTC
+  schedule:
+    - cron: '0 3 * * 0'
+
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run mode (no changes)'
+        required: false
+        type: boolean
+        default: true
+      force:
+        description: 'Force optimization (skip threshold check)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  optimize-supabase:
+    name: Optimize Supabase Database
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run dry-run analysis
+        if: github.event.inputs.dry_run == 'true' || github.event_name == 'schedule'
+        env:
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+        run: |
+          python scripts/supabase_optimization_workflow.py --dry-run
+
+      - name: Run optimization
+        if: github.event.inputs.dry_run != 'true' && github.event_name != 'schedule'
+        env:
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+        run: |
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            python scripts/supabase_optimization_workflow.py --optimize --force
+          else
+            python scripts/supabase_optimization_workflow.py --optimize
+          fi
+
+      - name: Upload optimization report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: optimization-report-${{ github.run_number }}
+          path: |
+            logs/optimization_workflow_*.json
+            logs/supabase_optimization.log
+          retention-days: 30
+
+      - name: Generate summary
+        if: always()
+        run: |
+          echo "## Database Optimization Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Find the most recent workflow report
+          REPORT=$(ls -t logs/optimization_workflow_*.json 2>/dev/null | head -1)
+
+          if [ -f "$REPORT" ]; then
+            echo "📊 **Report Generated**: $(basename $REPORT)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            # Extract key metrics using Python
+            python3 << EOF >> $GITHUB_STEP_SUMMARY
+          import json
+          import sys
+
+          try:
+              with open('$REPORT') as f:
+                  report = json.load(f)
+
+              print("### Summary")
+              print("")
+              print(f"- **Status**: {report.get('status', 'unknown').upper()}")
+              print(f"- **Duration**: {report.get('duration_formatted', 'N/A')}")
+              print(f"- **Dry Run**: {report.get('dry_run', False)}")
+              print("")
+
+              if 'database_analysis' in report.get('stages', {}):
+                  analysis = report['stages']['database_analysis'].get('data', {})
+                  print("### Database Analysis")
+                  print("")
+                  print(f"- **Total Size**: {analysis.get('total_size_mb', 0):.2f} MB")
+                  print(f"- **Tables**: {analysis.get('table_count', 0)}")
+                  print(f"- **Potential Savings**: {analysis.get('total_potential_savings_mb', 0):.2f} MB ({analysis.get('total_potential_savings_pct', 0):.1f}%)")
+                  print("")
+
+              if 'optimization' in report.get('stages', {}):
+                  opt_data = report['stages']['optimization'].get('data', {})
+                  if opt_data and 'optimization_stats' in opt_data:
+                      stats = opt_data['optimization_stats']
+                      print("### Optimization Results")
+                      print("")
+                      print(f"- **Video Stats Removed**: {stats.get('video_stats_removed', 0):,} rows")
+                      print(f"- **Channel Stats Removed**: {stats.get('channel_stats_removed', 0):,} rows")
+                      print(f"- **Thumbnails Optimized**: {stats.get('thumbnails_optimized', 0):,}")
+                      print(f"- **Space Reclaimed**: {stats.get('space_reclaimed_mb', 0):.2f} MB")
+                      print("")
+
+                      before = stats.get('before_size_mb', 0)
+                      after = stats.get('after_size_mb', 0)
+                      if before > 0:
+                          reduction_pct = ((before - after) / before) * 100
+                          print(f"- **Size Reduction**: {reduction_pct:.1f}%")
+                          print("")
+
+              if report.get('warnings'):
+                  print("### ⚠️ Warnings")
+                  print("")
+                  for warning in report['warnings']:
+                      print(f"- {warning}")
+                  print("")
+
+              if report.get('errors'):
+                  print("### ❌ Errors")
+                  print("")
+                  for error in report['errors']:
+                      print(f"- {error}")
+                  print("")
+
+          except Exception as e:
+              print(f"Error parsing report: {e}")
+              sys.exit(0)
+          EOF
+          else
+            echo "⚠️ No optimization report found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::Database optimization failed. Check logs for details."
