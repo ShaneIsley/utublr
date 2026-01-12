@@ -61,7 +61,7 @@ python fetch.py --config ../config/channels.yaml --dry-run
 python fetch.py --config ../config/channels.yaml --backfill
 
 # Fetch transcripts locally (YouTube blocks cloud IPs)
-python fetch_transcripts.py --channel @YourChannel
+python local/fetch_transcripts.py --channel @YourChannel
 ```
 
 ## Scripts
@@ -95,30 +95,30 @@ python fetch.py --config ../config/channels.yaml --skip-comments
 python fetch.py --export
 ```
 
-### fetch_transcripts.py - Transcript Fetcher (run locally)
+### local/fetch_transcripts.py - Transcript Fetcher (run locally)
 
-Fetches video transcripts. **Must be run locally** because YouTube blocks 
+Fetches video transcripts. **Must be run locally** because YouTube blocks
 transcript requests from cloud/CI IP addresses.
 
 ```bash
 # Fetch all missing transcripts
-python fetch_transcripts.py
+python local/fetch_transcripts.py
 
 # Fetch for specific channel
-python fetch_transcripts.py --channel @samwitteveenai
-python fetch_transcripts.py --channel UC55ODQSvARtgSyc8ThfiepQ
+python local/fetch_transcripts.py --channel @samwitteveenai
+python local/fetch_transcripts.py --channel UC55ODQSvARtgSyc8ThfiepQ
 
 # Fetch specific videos
-python fetch_transcripts.py --video VIDEO_ID1 VIDEO_ID2
+python local/fetch_transcripts.py --video VIDEO_ID1 VIDEO_ID2
 
 # Limit number to fetch
-python fetch_transcripts.py --limit 100
+python local/fetch_transcripts.py --limit 100
 
 # Slower rate limiting (default: 1 req/sec)
-python fetch_transcripts.py --delay 2.0
+python local/fetch_transcripts.py --delay 2.0
 
 # Test mode (don't save to database)
-python fetch_transcripts.py --dry-run --limit 10
+python local/fetch_transcripts.py --dry-run --limit 10
 ```
 
 ### analyse.py - Reports and Analysis
@@ -140,17 +140,17 @@ python analyse.py --sql "SELECT title, view_count FROM videos ORDER BY view_coun
 python analyse.py --report growth --output growth.csv
 ```
 
-### test_transcript.py - Transcript Debugging
+### local/test_transcript.py - Transcript Debugging
 
 ```bash
 # Test specific video
-python test_transcript.py VIDEO_ID
+python local/test_transcript.py VIDEO_ID
 
 # Test videos from a channel
-python test_transcript.py --channel @samwitteveenai --limit 20
+python local/test_transcript.py --channel @samwitteveenai --limit 20
 
 # Quick summary only
-python test_transcript.py --channel @samwitteveenai --limit 50 --quiet
+python local/test_transcript.py --channel @samwitteveenai --limit 50 --quiet
 ```
 
 ## Command Line Options
@@ -252,7 +252,7 @@ logs/
 - Summary report in Actions UI
 
 **Note:** Transcripts cannot be fetched in GitHub Actions (YouTube blocks cloud IPs).
-Run `fetch_transcripts.py` locally after the automated fetch completes.
+Run `local/fetch_transcripts.py` locally after the automated fetch completes.
 
 ### 3. JWT Token Management
 
@@ -439,7 +439,7 @@ settings:
 
 ### "All transcripts unavailable"
 - Transcripts must be fetched locally, not from CI/cloud
-- Run `python fetch_transcripts.py` from your local machine
+- Run `python local/fetch_transcripts.py` from your local machine
 - Use `--dry-run` to test before saving
 
 ### "YOUTUBE_API_KEY not provided"
