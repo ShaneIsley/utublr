@@ -74,7 +74,7 @@ class PostgresOptimizer:
         query = """
             SELECT
                 tablename,
-                pg_total_relation_size(schemaname||'.'||tablename)::numeric / 1024.0 / 1024.0 as size_mb
+                pg_total_relation_size('public'||'.'||tablename)::numeric / 1024.0 / 1024.0 as size_mb
             FROM pg_tables
             WHERE schemaname = 'public'
             ORDER BY size_mb DESC
