@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>utublr — Interactive ETL Pipeline Demo</title>
+<link href="https://fonts.googleapis.com/css2?family=IM+Fell+English:ital@0;1&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+<style>
+:root {
+  --bg: #FAFAF7;
+  --bg-inset: #F0EDE6;
+  --ink: #111111;
+  --ink-mid: #555555;
+  --ink-light: #888888;
+  --ink-ghost: rgba(17,17,17,0.18);
+  --border: #CCCCCC;
+  --border-heavy: #111111;
+  --fig-bg: #FFFFFF;
+  --font-body: 'IM Fell English', 'Times New Roman', Georgia, serif;
+  --font-mono: 'Courier Prime', 'Courier New', monospace;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+}
+
+.page-wrap {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 32px 16px;
+}
+
+/* ── Header ── */
+header {
+  padding-bottom: 16px;
+  border-bottom: 0.5px solid var(--border);
+  margin-bottom: 32px;
+}
+header .repo-name {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  color: var(--ink);
+  text-decoration: none;
+}
+header .repo-name:hover { text-decoration: underline; }
+header .desc {
+  color: var(--ink-mid);
+  font-style: italic;
+  font-size: 15px;
+  margin-top: 2px;
+}
+header .badge {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink);
+  border: 1px dotted var(--ink);
+  padding: 3px 8px;
+  margin-top: 8px;
+}
+
+/* ── Headings ── */
+h1 { font-size: 1.6em; font-weight: 700; margin-bottom: 8px; }
+h2 { font-size: 1.15em; font-weight: 700; margin: 32px 0 12px; }
+
+p { margin-bottom: 16px; }
+
+/* ── Figure frame ── */
+.figure-frame {
+  background: var(--fig-bg);
+  border: 0.5px solid var(--border);
+  padding: 0;
+  margin: 24px 0 8px;
+}
+.figure-frame svg { display: block; width: 100%; height: auto; }
+
+figcaption {
+  text-align: center;
+  font-style: italic;
+  font-size: 0.82em;
+  color: var(--ink-mid);
+  margin: 4px 0 24px;
+}
+
+/* ── Controls panel ── */
+.controls-panel {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  padding: 16px 20px;
+  margin: 16px 0 24px;
+}
+.controls-panel h3 {
+  font-family: var(--font-body);
+  font-variant: small-caps;
+  font-size: 0.9em;
+  letter-spacing: 0.04em;
+  margin-bottom: 12px;
+  color: var(--ink);
+}
+.control-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.control-row:last-child { margin-bottom: 0; }
+
+button {
+  font-family: var(--font-body);
+  font-size: 14px;
+  background: var(--bg-inset);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  padding: 6px 14px;
+  cursor: pointer;
+}
+button:hover { border-color: var(--border-heavy); }
+button:active { background: var(--bg); }
+
+.slider-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.slider-group label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-mid);
+  white-space: nowrap;
+}
+.slider-group .val {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-mid);
+  min-width: 32px;
+}
+
+/* ── Log panel ── */
+.log-panel {
+  background: var(--bg-inset);
+  border-left: 2px solid var(--ink);
+  padding: 12px 16px;
+  margin: 24px 0 8px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink);
+  height: 200px;
+  overflow-y: auto;
+}
+.log-panel .log-line { margin: 0; white-space: pre-wrap; }
+.log-panel .log-line .ts { color: var(--ink-light); }
+
+/* ── Footer ── */
+footer {
+  margin-top: 48px;
+  padding-top: 16px;
+  border-top: 0.5px solid var(--border);
+  font-size: 13px;
+  font-style: italic;
+  color: var(--ink-mid);
+}
+footer a { color: var(--ink-mid); }
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .control-row { flex-direction: column; align-items: flex-start; }
+}
+@media (max-width: 480px) {
+  body { font-size: 15px; }
+  .log-panel { font-size: 13px; }
+}
+</style>
+</head>
+<body>
+<div class="page-wrap">
+
+<header>
+  <a class="repo-name" href="https://github.com/ShaneIsley/utublr">utublr</a>
+  <div class="desc">Production ETL pipeline for YouTube channel analytics — interactive demo</div>
+  <span class="badge">Python</span>
+</header>
+
+<h1>ETL Pipeline Visualisation</h1>
+<p>
+  This interactive figure shows how utublr moves data from the YouTube API
+  through transformation into Turso, with checkpointing at each stage.
+  Inject failures to see how the pipeline recovers.
+</p>
+
+<!-- ════ Fig. 1 — Pipeline diagram ════ -->
+<div class="figure-frame">
+  <svg id="pipeline-svg" viewBox="0 0 700 220" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#111"/>
+      </marker>
+      <marker id="arrowhead-ghost" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="rgba(17,17,17,0.18)"/>
+      </marker>
+    </defs>
+
+    <!-- Stage boxes -->
+    <g id="stage-api">
+      <rect x="40" y="60" width="120" height="48" fill="none" stroke="#111" stroke-width="1.5"/>
+      <text x="100" y="88" text-anchor="middle" font-family="'IM Fell English',serif" font-size="14" fill="#111">API Fetch</text>
+    </g>
+    <g id="stage-transform">
+      <rect x="220" y="60" width="120" height="48" fill="none" stroke="#111" stroke-width="1.5"/>
+      <text x="280" y="88" text-anchor="middle" font-family="'IM Fell English',serif" font-size="14" fill="#111">Transform</text>
+    </g>
+    <g id="stage-write">
+      <rect x="400" y="60" width="120" height="48" fill="none" stroke="#111" stroke-width="1.5"/>
+      <text x="460" y="88" text-anchor="middle" font-family="'IM Fell English',serif" font-size="14" fill="#111">Turso Write</text>
+    </g>
+    <g id="stage-checkpoint">
+      <rect x="580" y="60" width="90" height="48" fill="none" stroke="#111" stroke-width="1.5"/>
+      <text x="625" y="88" text-anchor="middle" font-family="'IM Fell English',serif" font-size="14" fill="#111">Checkpoint</text>
+    </g>
+
+    <!-- Connecting lines with arrows -->
+    <line x1="160" y1="84" x2="218" y2="84" stroke="#111" stroke-width="1" marker-end="url(#arrowhead)"/>
+    <line x1="340" y1="84" x2="398" y2="84" stroke="#111" stroke-width="1" marker-end="url(#arrowhead)"/>
+    <line x1="520" y1="84" x2="578" y2="84" stroke="#111" stroke-width="1" marker-end="url(#arrowhead)"/>
+
+    <!-- Quota counter (hidden by default) -->
+    <g id="quota-display" opacity="0">
+      <text x="100" y="130" text-anchor="middle" font-family="'Courier Prime',monospace" font-size="11" fill="#555" id="quota-text">Quota: 0/100</text>
+    </g>
+
+    <!-- Checkpoint marker (dashed vertical line, hidden) -->
+    <line id="checkpoint-line" x1="625" y1="45" x2="625" y2="125" stroke="#111" stroke-width="1" stroke-dasharray="4,3" opacity="0"/>
+    <text id="checkpoint-label" x="625" y="140" text-anchor="middle" font-family="'Courier Prime',monospace" font-size="10" fill="#555" opacity="0"></text>
+
+    <!-- Dynamic layer for packets, failure marks, retry arcs -->
+    <g id="dynamic-layer"></g>
+  </svg>
+</div>
+<figcaption>
+  <em>Fig. 1 — ETL pipeline stages. Filled circles (&#9679;) are data packets.
+  Failure shown by &#215; marks; dashed arcs indicate retry loops.</em>
+</figcaption>
+
+<!-- ════ Controls ════ -->
+<div class="controls-panel">
+  <h3>Pipeline Controls</h3>
+  <div class="control-row">
+    <button id="btn-run">Run pipeline</button>
+    <button id="btn-resume" disabled>Resume from checkpoint</button>
+  </div>
+  <div class="control-row">
+    <div class="slider-group">
+      <label>Quota budget</label>
+      <input type="range" id="slider-quota" min="0" max="100" value="80">
+      <span class="val" id="quota-val">80%</span>
+    </div>
+  </div>
+</div>
+
+<div class="controls-panel">
+  <h3>Failure Injection</h3>
+  <div class="control-row">
+    <button id="btn-fail-quota">API quota exceeded</button>
+    <button id="btn-fail-network">Network interruption</button>
+    <button id="btn-fail-stale">Stale data / deletion</button>
+  </div>
+</div>
+
+<!-- ════ Fig. 2 — Log panel ════ -->
+<h2>Event Log</h2>
+<div class="log-panel" id="log-panel"></div>
+<figcaption>
+  <em>Fig. 2 — Pipeline event log. Timestamped events appear as the animation runs.</em>
+</figcaption>
+
+<footer>
+  Part of <a href="https://github.com/ShaneIsley">Shane Isley</a>'s project portfolio.
+  <a href="https://github.com/ShaneIsley/utublr">View on GitHub</a>.
+</footer>
+
+</div><!-- .page-wrap -->
+
+<script>
+(function() {
+  "use strict";
+
+  // ── Constants ──
+  const STAGES = [
+    { name: "API Fetch",   cx: 100, left: 40,  right: 160 },
+    { name: "Transform",   cx: 280, left: 220, right: 340 },
+    { name: "Turso Write", cx: 460, left: 400, right: 520 },
+    { name: "Checkpoint",  cx: 625, left: 580, right: 670 },
+  ];
+  const PIPE_Y = 84;
+  const PACKET_R = 5;
+
+  // Waypoints: packet travels along these x positions
+  const WAYPOINTS = [
+    40,   // start: left edge of API box
+    100,  // centre of API box
+    160,  // exit API
+    220,  // enter Transform
+    280,  // centre Transform
+    340,  // exit Transform
+    400,  // enter Turso Write
+    460,  // centre Turso Write
+    520,  // exit Turso Write
+    580,  // enter Checkpoint
+    625,  // centre Checkpoint
+    670,  // end
+  ];
+
+  // Stage index mapping: which waypoint index corresponds to each stage centre
+  const STAGE_CENTRE_WP = [1, 4, 7, 10];
+
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const dynLayer = document.getElementById("dynamic-layer");
+  const logPanel = document.getElementById("log-panel");
+  const quotaDisplay = document.getElementById("quota-display");
+  const quotaText = document.getElementById("quota-text");
+  const checkpointLine = document.getElementById("checkpoint-line");
+  const checkpointLabel = document.getElementById("checkpoint-label");
+
+  const btnRun = document.getElementById("btn-run");
+  const btnResume = document.getElementById("btn-resume");
+  const btnFailQuota = document.getElementById("btn-fail-quota");
+  const btnFailNetwork = document.getElementById("btn-fail-network");
+  const btnFailStale = document.getElementById("btn-fail-stale");
+  const sliderQuota = document.getElementById("slider-quota");
+  const quotaVal = document.getElementById("quota-val");
+
+  // ── State ──
+  let packets = [];
+  let failureMarks = [];  // SVG elements to clean up
+  let retryArcs = [];
+  let animId = null;
+  let running = false;
+  let paused = false;
+  let quotaBudget = 80;
+  let quotaUsed = 0;
+  let checkpointAt = -1;  // waypoint index of last checkpoint
+  let itemsCheckpointed = 0;
+  let totalPacketsLaunched = 0;
+  let totalPacketsFinished = 0;
+  let injectedFailure = null; // null | "quota" | "network" | "stale"
+  let logLineCount = 0;
+  let channelNames = ["@Veritasium", "@3Blue1Brown", "@SmarterEveryDay", "@TomScottGo", "@Kurzgesagt"];
+  let channelIdx = 0;
+
+  // ── Helpers ──
+  function timestamp() {
+    var d = new Date();
+    return d.toISOString().substring(11, 19);
+  }
+
+  function log(msg) {
+    logLineCount++;
+    var line = document.createElement("div");
+    line.className = "log-line";
+    line.innerHTML = '<span class="ts">[' + timestamp() + ']</span> ' + msg;
+    logPanel.appendChild(line);
+    logPanel.scrollTop = logPanel.scrollHeight;
+  }
+
+  function clearDynamic() {
+    while (dynLayer.firstChild) dynLayer.removeChild(dynLayer.firstChild);
+    failureMarks = [];
+    retryArcs = [];
+  }
+
+  function createCircle(x, y, r, cls) {
+    var c = document.createElementNS(SVG_NS, "circle");
+    c.setAttribute("cx", x);
+    c.setAttribute("cy", y);
+    c.setAttribute("r", r);
+    c.setAttribute("fill", "#111");
+    dynLayer.appendChild(c);
+    return c;
+  }
+
+  function createX(x, y) {
+    var g = document.createElementNS(SVG_NS, "g");
+    var s = 6;
+    var l1 = document.createElementNS(SVG_NS, "line");
+    l1.setAttribute("x1", x - s); l1.setAttribute("y1", y - s);
+    l1.setAttribute("x2", x + s); l1.setAttribute("y2", y + s);
+    l1.setAttribute("stroke", "#111"); l1.setAttribute("stroke-width", "1.5");
+    var l2 = document.createElementNS(SVG_NS, "line");
+    l2.setAttribute("x1", x + s); l2.setAttribute("y1", y - s);
+    l2.setAttribute("x2", x - s); l2.setAttribute("y2", y + s);
+    l2.setAttribute("stroke", "#111"); l2.setAttribute("stroke-width", "1.5");
+    g.appendChild(l1);
+    g.appendChild(l2);
+    dynLayer.appendChild(g);
+    failureMarks.push(g);
+    return g;
+  }
+
+  function createRetryArc(x, stageIdx) {
+    // Dashed arc looping back from failure point
+    var arcY = PIPE_Y - 30;
+    var startX = x;
+    var endX = WAYPOINTS[STAGE_CENTRE_WP[stageIdx] - 1] || x - 40;
+    if (endX >= startX) endX = startX - 40;
+    var midX = (startX + endX) / 2;
+
+    var path = document.createElementNS(SVG_NS, "path");
+    var d = "M " + startX + " " + PIPE_Y +
+            " C " + startX + " " + (arcY - 10) + ", " + endX + " " + (arcY - 10) + ", " + endX + " " + PIPE_Y;
+    path.setAttribute("d", d);
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", "#111");
+    path.setAttribute("stroke-width", "0.9");
+    path.setAttribute("stroke-dasharray", "6,3");
+    path.setAttribute("marker-end", "url(#arrowhead)");
+    dynLayer.appendChild(path);
+    retryArcs.push(path);
+    return path;
+  }
+
+  function updateQuotaDisplay() {
+    quotaDisplay.setAttribute("opacity", running ? "1" : "0");
+    quotaText.textContent = "Quota: " + quotaUsed + "/" + quotaBudget;
+  }
+
+  function updateCheckpointDisplay() {
+    if (checkpointAt >= 0) {
+      var cx = WAYPOINTS[checkpointAt] || 625;
+      checkpointLine.setAttribute("x1", cx);
+      checkpointLine.setAttribute("x2", cx);
+      checkpointLine.setAttribute("opacity", "1");
+      checkpointLabel.setAttribute("x", cx);
+      checkpointLabel.textContent = "ckpt @ " + itemsCheckpointed;
+      checkpointLabel.setAttribute("opacity", "1");
+    } else {
+      checkpointLine.setAttribute("opacity", "0");
+      checkpointLabel.setAttribute("opacity", "0");
+    }
+  }
+
+  // ── Packet object ──
+  function makePacket(startWP, id) {
+    var wp = startWP || 0;
+    var el = createCircle(WAYPOINTS[wp], PIPE_Y, PACKET_R);
+    return {
+      el: el,
+      wp: wp,           // current waypoint index
+      progress: 0,      // 0..1 between current wp and next
+      speed: 0.012 + Math.random() * 0.008,  // slightly varied
+      alive: true,
+      finished: false,
+      failed: false,
+      id: id,
+      retrying: false,
+      retryTimer: 0,
+      pauseTimer: 0,
+    };
+  }
+
+  function movePacket(p) {
+    if (!p.alive || p.finished || p.failed) return;
+
+    // Pause frames at stage centres
+    if (p.pauseTimer > 0) {
+      p.pauseTimer--;
+      return;
+    }
+
+    // Retry delay
+    if (p.retrying) {
+      p.retryTimer--;
+      if (p.retryTimer <= 0) {
+        p.retrying = false;
+        log("Retry succeeded for packet " + p.id);
+      }
+      return;
+    }
+
+    p.progress += p.speed;
+
+    if (p.progress >= 1) {
+      p.progress = 0;
+      p.wp++;
+
+      if (p.wp >= WAYPOINTS.length - 1) {
+        // Reached end
+        p.finished = true;
+        p.el.setAttribute("cx", WAYPOINTS[WAYPOINTS.length - 1]);
+        totalPacketsFinished++;
+        return;
+      }
+
+      // Check if at a stage centre => pause frames + quota + checkpoint
+      var stageIdx = STAGE_CENTRE_WP.indexOf(p.wp);
+      if (stageIdx >= 0) {
+        p.pauseTimer = 12; // pause frames
+
+        // Quota usage at API stage
+        if (stageIdx === 0) {
+          var cost = stageIdx === 0 ? 5 : 1;
+          quotaUsed += cost;
+          updateQuotaDisplay();
+          log("Fetching " + channelNames[channelIdx % channelNames.length] + "... (+" + cost + " units)");
+          channelIdx++;
+        }
+        if (stageIdx === 1) {
+          log("Transforming: validating schema, parsing chapters...");
+        }
+        if (stageIdx === 2) {
+          log("Writing batch to Turso (upsert, commit)");
+        }
+
+        // Checkpoint at last stage
+        if (stageIdx === 3) {
+          checkpointAt = p.wp;
+          itemsCheckpointed = totalPacketsFinished + 1;
+          updateCheckpointDisplay();
+          log("Checkpoint saved at item " + itemsCheckpointed);
+        }
+
+        // ── Failure injection checks ──
+        if (injectedFailure === "quota" && stageIdx === 0) {
+          if (quotaUsed >= quotaBudget) {
+            p.failed = true;
+            createX(WAYPOINTS[p.wp], PIPE_Y);
+            log("QUOTA EXCEEDED (" + quotaUsed + "/" + quotaBudget + ") \u2014 pipeline halted");
+            stopPipeline();
+            return;
+          }
+        }
+
+        if (injectedFailure === "network" && stageIdx === 2) {
+          // Fail mid-write, show retry arc
+          p.failed = true;
+          createX(WAYPOINTS[p.wp], PIPE_Y);
+          createRetryArc(WAYPOINTS[p.wp], stageIdx);
+          log("NETWORK ERROR at Turso write \u2014 retry arc initiated");
+
+          // After a delay, "recover" this packet
+          p.retrying = true;
+          p.retryTimer = 45;
+          p.failed = false;
+          setTimeout(function() {
+            log("Backoff: 1.0s \u2192 2.0s \u2192 retrying with fresh connection...");
+          }, 600);
+          injectedFailure = null; // one-shot
+          return;
+        }
+
+        if (injectedFailure === "stale" && stageIdx === 1) {
+          // Mark some packets as deleted at transform
+          p.failed = true;
+          createX(WAYPOINTS[p.wp], PIPE_Y);
+          log("Deletion detected: video no longer on channel \u2014 marked privacy_status='deleted'");
+          injectedFailure = null;
+          return;
+        }
+      }
+    }
+
+    // Interpolate position
+    if (p.wp < WAYPOINTS.length - 1) {
+      var x = WAYPOINTS[p.wp] + (WAYPOINTS[p.wp + 1] - WAYPOINTS[p.wp]) * p.progress;
+      p.el.setAttribute("cx", x);
+    }
+  }
+
+  // ── Animation loop ──
+  var frameCount = 0;
+  var launchInterval = 50; // frames between new packets
+  var maxPackets = 8;
+
+  function tick() {
+    if (!running) return;
+    frameCount++;
+
+    // Launch new packets periodically
+    if (frameCount % launchInterval === 0 && totalPacketsLaunched < maxPackets) {
+      var p = makePacket(0, totalPacketsLaunched + 1);
+      packets.push(p);
+      totalPacketsLaunched++;
+      quotaUsed += 1; // channels.list cost
+      updateQuotaDisplay();
+      log("Quota: " + quotaUsed + "/" + quotaBudget);
+    }
+
+    // Move all live packets
+    for (var i = 0; i < packets.length; i++) {
+      movePacket(packets[i]);
+    }
+
+    // Fade finished packets
+    for (var j = 0; j < packets.length; j++) {
+      if (packets[j].finished) {
+        packets[j].el.setAttribute("fill", "rgba(17,17,17,0.18)");
+      }
+    }
+
+    // Check if all done
+    var allDone = totalPacketsLaunched >= maxPackets;
+    if (allDone) {
+      var anyActive = false;
+      for (var k = 0; k < packets.length; k++) {
+        if (packets[k].alive && !packets[k].finished && !packets[k].failed) {
+          anyActive = true;
+          break;
+        }
+      }
+      if (!anyActive) {
+        log("Pipeline complete. " + totalPacketsFinished + "/" + totalPacketsLaunched + " packets succeeded.");
+        stopPipeline();
+        return;
+      }
+    }
+
+    animId = requestAnimationFrame(tick);
+  }
+
+  function startPipeline(resumeWP) {
+    if (running) return;
+    clearDynamic();
+    packets = [];
+    totalPacketsLaunched = 0;
+    totalPacketsFinished = 0;
+    quotaUsed = 0;
+    frameCount = 0;
+    injectedFailure = null;
+    channelIdx = 0;
+    running = true;
+
+    if (typeof resumeWP === "number" && resumeWP > 0) {
+      // Resume: start from checkpoint
+      log("Resuming from checkpoint (item " + itemsCheckpointed + ")...");
+      maxPackets = 4;
+      launchInterval = 40;
+    } else {
+      checkpointAt = -1;
+      itemsCheckpointed = 0;
+      maxPackets = 8;
+      launchInterval = 50;
+      log("Pipeline started. Quota budget: " + quotaBudget + " units.");
+    }
+
+    updateQuotaDisplay();
+    updateCheckpointDisplay();
+    btnRun.disabled = true;
+    btnResume.disabled = true;
+    animId = requestAnimationFrame(tick);
+  }
+
+  function stopPipeline() {
+    running = false;
+    if (animId) cancelAnimationFrame(animId);
+    animId = null;
+    btnRun.disabled = false;
+    btnResume.disabled = (checkpointAt < 0);
+    updateQuotaDisplay();
+  }
+
+  // ── Event listeners ──
+  btnRun.addEventListener("click", function() { startPipeline(); });
+  btnResume.addEventListener("click", function() {
+    if (checkpointAt >= 0) {
+      startPipeline(checkpointAt);
+    }
+  });
+
+  btnFailQuota.addEventListener("click", function() {
+    if (!running) { log("Start the pipeline first."); return; }
+    injectedFailure = "quota";
+    quotaUsed = quotaBudget - 3; // nearly full
+    updateQuotaDisplay();
+    log("INJECTED: API quota nearly exhausted (" + quotaUsed + "/" + quotaBudget + ")");
+  });
+
+  btnFailNetwork.addEventListener("click", function() {
+    if (!running) { log("Start the pipeline first."); return; }
+    injectedFailure = "network";
+    log("INJECTED: Network interruption will occur at next Turso write");
+  });
+
+  btnFailStale.addEventListener("click", function() {
+    if (!running) { log("Start the pipeline first."); return; }
+    injectedFailure = "stale";
+    log("INJECTED: Stale/deleted video will be detected at next transform");
+  });
+
+  sliderQuota.addEventListener("input", function() {
+    quotaBudget = parseInt(this.value, 10);
+    quotaVal.textContent = quotaBudget + "%";
+    updateQuotaDisplay();
+  });
+
+  // Pause when tab hidden
+  document.addEventListener("visibilitychange", function() {
+    if (document.hidden && running) {
+      paused = true;
+      if (animId) cancelAnimationFrame(animId);
+    } else if (!document.hidden && paused && running) {
+      paused = false;
+      animId = requestAnimationFrame(tick);
+    }
+  });
+
+  // Initial state
+  updateCheckpointDisplay();
+  log("Ready. Press \u201cRun pipeline\u201d to begin.");
+
+})();
+</script>
+</body>
+</html>
